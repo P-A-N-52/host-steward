@@ -1,0 +1,14 @@
+{
+  "id": "example.resource",
+  "kind": "directory",
+  "locator": "/absolute/path/to/resource",
+  "purpose": "此条演示格式；登记实际资源时填写具体用途",
+  "owner": "待确认",
+  "dependencies": [],
+  "retention": "用途与保留规则待确认，原位保留",
+  "maintenance": "先做只读调查；具体操作引用 host.json 的既有约定",
+  "basis": "reported",
+  "source": "样例定义，非本机事实；实际登记时填写文件、观察或用户陈述的出处",
+  "evidence_at": 0,
+  "review_after_hours": 720
+}

@@ -1,0 +1,511 @@
+{
+  "snapshot_date": "2026-10-16",
+  "purpose": "Reference snapshots for Host Steward; not installed or executed",
+  "sources": {
+    "openclaw": {
+      "repository": "https://github.com/openclaw/openclaw",
+      "commit": "e9487842a64682c00c197ba721071a616fa8b114",
+      "skills": [
+        "skills/healthcheck",
+        "skills/model-usage",
+        "skills/skill-creator",
+        "skills/tmux",
+        "custodian-skills/diagnose-gateway",
+        ".agents/skills/openclaw-live-updater"
+      ],
+      "documents": [
+        "docs/gateway/heartbeat.md",
+        "docs/tools/custodian-skills.md",
+        "docs/tools/creating-skills.md"
+      ],
+      "license": "MIT",
+      "license_file": "openclaw/LICENSE"
+    },
+    "hermes": {
+      "repository": "https://github.com/NousResearch/hermes-agent",
+      "commit": "4e59ac2b883b4133ea8a2d299abac45189781c09",
+      "skills": [
+        "optional-skills/devops/docker-management",
+        "optional-skills/devops/watchers",
+        "optional-skills/devops/hermes-s6-container-supervision",
+        "skills/autonomous-ai-agents/hermes-agent",
+        "skills/software-development/hermes-agent-skill-authoring",
+        "skills/software-development/systematic-debugging"
+      ],
+      "documents": [
+        "website/docs/user-guide/features/heartbeat.md",
+        "website/docs/user-guide/features/cron.md",
+        "website/docs/guides/cron-script-only.md",
+        "website/docs/developer-guide/creating-skills.md"
+      ],
+      "license": "MIT",
+      "license_file": "hermes/LICENSE"
+    }
+  },
+  "files": [
+    {
+      "project": "hermes",
+      "source_path": "LICENSE",
+      "git_blob_sha1": "75410e73319c72cd3e991a501c5455eb78f38375",
+      "sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+      "bytes": 1070,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "optional-skills/devops/docker-management/SKILL.md",
+      "git_blob_sha1": "428eb43c45b0091099297f6c222ccf9fc85ebb3c",
+      "sha256": "6425a2cf3f682f4b6812522dcb7ceaea7dab9ba0fbf159fb900280edc5f69e50",
+      "bytes": 10426,
+      "mode": "100755"
+    },
+    {
+      "project": "hermes",
+      "source_path": "optional-skills/devops/hermes-s6-container-supervision/SKILL.md",
+      "git_blob_sha1": "dc3184feac4094ce1cfeca235eba4e38cd59fc6d",
+      "sha256": "b9b65b6d74ef9d9fee60813700bf93da7bb2f28d1f952686c82c178ebe158246",
+      "bytes": 11991,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "optional-skills/devops/watchers/SKILL.md",
+      "git_blob_sha1": "7c326ae7e4b8d1fdaeaafc50ba727fe938263c69",
+      "sha256": "29c01df1882d6e15c36a4c0af5a854a3c4fab5cf1c6657c02a0979315e8c606a",
+      "bytes": 4500,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "optional-skills/devops/watchers/scripts/_watermark.py",
+      "git_blob_sha1": "7dfbd7e5154d6c287cef72ea8db0c7c98e6bc9f9",
+      "sha256": "1c362e220a9c29dde992d27d9d34b18776a9b3bc3c6c2c957683d2df97a61aff",
+      "bytes": 5241,
+      "mode": "100755"
+    },
+    {
+      "project": "hermes",
+      "source_path": "optional-skills/devops/watchers/scripts/watch_github.py",
+      "git_blob_sha1": "4b42d4ed3eeca338215275769fd2d69c8f85a5d5",
+      "sha256": "8b3d14ccf44eff192372d8965b6d594a28c4fe45e1140b269ae36cacb520bc8c",
+      "bytes": 6203,
+      "mode": "100755"
+    },
+    {
+      "project": "hermes",
+      "source_path": "optional-skills/devops/watchers/scripts/watch_http_json.py",
+      "git_blob_sha1": "6d8be8c54130cc47c58cd2159c3df9c17af05577",
+      "sha256": "b47cb0d9c36c7452699c81807369cdf1a1f6458888a400c3ba38d3c45eb1098d",
+      "bytes": 4589,
+      "mode": "100755"
+    },
+    {
+      "project": "hermes",
+      "source_path": "optional-skills/devops/watchers/scripts/watch_rss.py",
+      "git_blob_sha1": "6e09630404f93ca1c0e6752055616304b2a32453",
+      "sha256": "8ab4336977812aad20346bd55fad3e6425221a70085f7a8821166ad942446833",
+      "bytes": 4114,
+      "mode": "100755"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/SKILL.md",
+      "git_blob_sha1": "a184b3a47a59848dc015b525d438cc5b2e2dffae",
+      "sha256": "dcdc4b2d232ad415c76e09cc229a2c861f3e1225fd1f1262b33a965ea4732b24",
+      "bytes": 13190,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/background-systems.md",
+      "git_blob_sha1": "efb1ae2497ffa73fecd7f1dd4833afbacadedf5f",
+      "sha256": "70099ca64774cc7e70a33330d180f862cf19a02c0f936dc4c50d51c6d0b73556",
+      "bytes": 5069,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/cli-reference.md",
+      "git_blob_sha1": "f68b358cb5f7df865a02b1e36c044460bbaf1a25",
+      "sha256": "a15c6838f9ac1e35b0e113a66738b3ce27bb6500d31218797467a2f8691341b5",
+      "bytes": 6617,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/configuration.md",
+      "git_blob_sha1": "a3bcffe307463be982dd09bc7804d90adec9ec60",
+      "sha256": "ba075f369ff66e60134d4a472894599b18dd9f8f715840a928a5ff7e818f2455",
+      "bytes": 4431,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/contributor-guide.md",
+      "git_blob_sha1": "b23f07c17605f391c1616c47fce7273451c29e04",
+      "sha256": "097c860be377fcfc0c414d07dffe2ba5470ae33e3805a6536c2956dc6f520087",
+      "bytes": 5900,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/delegate-task-concurrency-diagnosis.md",
+      "git_blob_sha1": "34851bb0ed5a20ea66b9ee15e4aa2866e3ca391f",
+      "sha256": "41019dd37c0c048b002d3639fe01455513b5c9aba142a21ff9c3bd4c7718a77b",
+      "bytes": 4660,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/desktop-plugins.md",
+      "git_blob_sha1": "eee55adecb4b9575c85efdac6f38acf4925e549c",
+      "sha256": "2bd78982684a2612f27756b3e2f7eb744d17f72e523e5586d2b388f6d7db1037",
+      "bytes": 14019,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/native-mcp.md",
+      "git_blob_sha1": "0fed2652193019efbcd5d5209014ea2ce1760ce2",
+      "sha256": "ded08718d2eb141262a31b323f8e66eeb40f35e074e1f0e70abb76860891ec92",
+      "bytes": 12581,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/petdex.md",
+      "git_blob_sha1": "4fc564f240a31c3910a8dd4fb8ce88caa81b842e",
+      "sha256": "2254eabf40c360efb54e4df482f3b84820b54a15e6954c4a7e9e7fee4eb90f77",
+      "bytes": 3244,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/portal-auth-for-third-party-apps.md",
+      "git_blob_sha1": "37a8feba9516168f87f48326727438268b889d03",
+      "sha256": "4890617a80d8c70fc388a49201d5a718049a64c0ddd5fac3f35754641f063b99",
+      "bytes": 6579,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/project-context-files.md",
+      "git_blob_sha1": "7a6d8ee190719bc4355d6dc34f190009968ddb6d",
+      "sha256": "20b51406102e6498f62ed837978e5c67ebd91a917b985de7bbddfaaf23c1f593",
+      "bytes": 3285,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/providers-and-models.md",
+      "git_blob_sha1": "71d46afe525efbb97da21c54669d98bfcad8c920",
+      "sha256": "41c9c8e9de3a66c5e7f12c6fe39916d58a13e315be1dfd712fbf8cdaab4af203",
+      "bytes": 3381,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/security-privacy.md",
+      "git_blob_sha1": "4465fef93a2b0578fc740d32ca5e21c0ebe82d5e",
+      "sha256": "f27913f7775915d8065b2dea782197907ff90cf37f07b865135c7f61aee98e83",
+      "bytes": 3393,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/slash-commands.md",
+      "git_blob_sha1": "e501fa00c659a807feff61421c505b5dc6cb60d1",
+      "sha256": "690dc6c2543dfa028bbf2918c229f27f4962e9d897fce25ebb1de67d56f3b822",
+      "bytes": 5379,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/themes.md",
+      "git_blob_sha1": "b4ded40cb0caf6cbff4d0618d6abe8153746835c",
+      "sha256": "f5a8269a7312173f0caa6736156a3f76d32e56b4e15511e84dc2e902f48e8157",
+      "bytes": 6887,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/troubleshooting.md",
+      "git_blob_sha1": "7d76e6fa4eead500e1932cb7b5d2bd3148d078e0",
+      "sha256": "70045d9a3dd4f8ff4001b3a7ccfa7f967c130ce89877ee5f052c87752fcd5f5b",
+      "bytes": 3767,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/tui-widgets.md",
+      "git_blob_sha1": "c9eb6717f05e3a40179296692e8e61670e327807",
+      "sha256": "20e21aabb757a9d3c7d895db8f05a3782fe8b28feef3768ac5550c8860b4a3db",
+      "bytes": 6484,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/webhooks.md",
+      "git_blob_sha1": "78b0d12c4b7de28c03ba4d800a5ced4d26b0f009",
+      "sha256": "f668c57d1900e249cb4b54e5d624e9aacb399ecf1452f9b258a1bf857ffa8a42",
+      "bytes": 8466,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/references/windows-quirks.md",
+      "git_blob_sha1": "b94595ed82f70a6eb961b5efdce0c443f1dab300",
+      "sha256": "4af2c0907983376f1b21d2164de17f1229faeb0609c61762cfc026b806bc5501",
+      "bytes": 2671,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/templates/clock.mjs",
+      "git_blob_sha1": "fea22af3499f5ef518718f49d343253933b2b62e",
+      "sha256": "44ec25d560e16c7815a633039a783ddbba2d8e8cf1659560c0cd1cddec83f89d",
+      "bytes": 1423,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/templates/plugin.js",
+      "git_blob_sha1": "e3e75ed474aa59883d413a671ad85536be77cb79",
+      "sha256": "a63c8f879756854b45373f5d6b1ae0a7fefcdd4a5af840be8a60d83b64724744",
+      "bytes": 3141,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/autonomous-ai-agents/hermes-agent/templates/skin.yaml",
+      "git_blob_sha1": "1316511413b71dfa14e20bf8b208ea415f487564",
+      "sha256": "bc8fddd7e5373b074c1c7dd423bb59d6e04769977e8a18354e3a6b3983209994",
+      "bytes": 1389,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/software-development/hermes-agent-skill-authoring/SKILL.md",
+      "git_blob_sha1": "1d39a900b3757b817ff4c72c2eeba6cb1414210b",
+      "sha256": "1f8d0be987c7c2d6095849ebb6dc8ff908ca1a43bdcc300fa936922c14271ecd",
+      "bytes": 14537,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "skills/software-development/systematic-debugging/SKILL.md",
+      "git_blob_sha1": "275746e7bb9bf0ed4cc45a9284f3a6277894fd4e",
+      "sha256": "bd480f51a2e9969c88544003c30b7539b7df0b7358703f99b0495514c2dd878a",
+      "bytes": 14059,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "website/docs/developer-guide/creating-skills.md",
+      "git_blob_sha1": "2b8edca03db2e960fff45aad66e22b0eae89014e",
+      "sha256": "cb7773a1afc348fa70f051f6649b9047a854b0bf0c2cd6c74e562498ca776787",
+      "bytes": 20734,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "website/docs/guides/cron-script-only.md",
+      "git_blob_sha1": "8c4de0b267cf1759d5ec1d5b297233af2474486a",
+      "sha256": "29f8cfe166065da33d6fef67897792c4b7e25be0e88241d0acfad39354d64cf0",
+      "bytes": 13417,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "website/docs/user-guide/features/cron.md",
+      "git_blob_sha1": "6e315619f22387697b0aaad59cd4afb60ee54435",
+      "sha256": "9601293aa1ce93dc83f963f3624a0745c9ab85170c4cebb04f8e05193af074f6",
+      "bytes": 80213,
+      "mode": "100644"
+    },
+    {
+      "project": "hermes",
+      "source_path": "website/docs/user-guide/features/heartbeat.md",
+      "git_blob_sha1": "0ab85dd08f955f78115b174ceca29b377cdce9a3",
+      "sha256": "dc90ca22e0de82432c4d7f2e32c14acc88dcdd8d51c3dfbf920c351ca37011e7",
+      "bytes": 5668,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": ".agents/skills/openclaw-live-updater/SKILL.md",
+      "git_blob_sha1": "b83c9238cfbe15c624e8fd7479f295cf3ef35e69",
+      "sha256": "9e58dde9ac17d523bc04f52327b81a187010447633f5b77b816ef8e6bba582de",
+      "bytes": 14901,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": ".agents/skills/openclaw-live-updater/agents/openai.yaml",
+      "git_blob_sha1": "647741be670069c1ff9d13e1de47a2778ecbcc5e",
+      "sha256": "272d7fc45e2bcbf3bcee9b55f7b538919eac201d2342389d6b1dcf84868b31ee",
+      "bytes": 345,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": ".agents/skills/openclaw-live-updater/scripts/update-main.mjs",
+      "git_blob_sha1": "9d8ac552d28f25e5c80d2a5d11c87b83f95c09b5",
+      "sha256": "9a6b3652b3daabdb82996e9ebce9c60d410a147ce71735e96498586b062b2c78",
+      "bytes": 125300,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "LICENSE",
+      "git_blob_sha1": "ed064819ab537575d0cad902f7e5af4a3488b1d0",
+      "sha256": "9efd316ecf1c4c60f6fd5d26433142fff2b6794d7d328e9bc6179b29bf9c82a4",
+      "bytes": 1076,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "custodian-skills/diagnose-gateway/SKILL.md",
+      "git_blob_sha1": "34533b6f627fbe6ee28c0291d62fcd8eadcc73b4",
+      "sha256": "e0448d96d55cb459ada8a1f475a6f1fb62e6d75dcaa63aee08e15360b8ca1a7d",
+      "bytes": 2683,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "docs/gateway/heartbeat.md",
+      "git_blob_sha1": "33433823a9f5bc9177444a55c3513d0ec6ed7019",
+      "sha256": "3059300ebe1440549f1ffac5d4137019d41bfd9de591ab5d31ff4ad1e8f981a8",
+      "bytes": 42004,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "docs/tools/creating-skills.md",
+      "git_blob_sha1": "417ed0000f34c8e407c7ca57fef7c701e13c5e0a",
+      "sha256": "b9e1902ef3da74eaada9cc846f7cad0ea783d1214181f7ac60fe22769af1ea9f",
+      "bytes": 9811,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "docs/tools/custodian-skills.md",
+      "git_blob_sha1": "241fe685d2df912688fa694d6dec19f8bd5c9c1a",
+      "sha256": "4890c4bcb5d133c3add1f648356d915eb1266025b60b4c304fcf258f0b189225",
+      "bytes": 5298,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/healthcheck/SKILL.md",
+      "git_blob_sha1": "699d1a6aa35d266bc69e5716a032165b0c5dd037",
+      "sha256": "b41044aeb25afe95daa5c8ef6f2d6b8d197f6a0b113b0888deaa4dd69e42b59b",
+      "bytes": 2909,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/model-usage/SKILL.md",
+      "git_blob_sha1": "eca1c6dd6403c0cea5b2896eb2cb0f83280a2e79",
+      "sha256": "f4e40f006365acc5f519a55f4efacb6c722788026792e498fcf46dc1a0f0c1d1",
+      "bytes": 2550,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/model-usage/references/codexbar-cli.md",
+      "git_blob_sha1": "e418631b49af202f84fc772ed574ebd000d346c4",
+      "sha256": "58e57a7bf1359ed32b1fe80c7285e75f88127e82db6b0dbab2ec4dda6ffaca42",
+      "bytes": 1299,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/model-usage/scripts/model_usage.py",
+      "git_blob_sha1": "ba6851735c9e3a7b0f7efa2ca9a18deddf895cb2",
+      "sha256": "cd13c65d9d10faaff20bdf40d5f45f6d26a29dacc3e13d8a1e481a3a8a0f4874",
+      "bytes": 11490,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/model-usage/scripts/test_model_usage.py",
+      "git_blob_sha1": "ad7497d8396131cf95972777d79d462540d9445a",
+      "sha256": "1bc6fceb436d836532e6901edb6eb473a68a16eda25f45f94322d99beea4a3b2",
+      "bytes": 5218,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/skill-creator/SKILL.md",
+      "git_blob_sha1": "cc0d1d7abe5eeb9f91d1a308affe577d6b71ee54",
+      "sha256": "7da0631cb21fbd87630b5dbeb48010f66776c28e396c276235f5d245903fa6ed",
+      "bytes": 2301,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/skill-creator/license.txt",
+      "git_blob_sha1": "d645695673349e3947e8e5ae42332d0ac3164cd7",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bytes": 11358,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/skill-creator/scripts/package_skill.py",
+      "git_blob_sha1": "a5442a463937680a5c9d14c245a451646ebc26f7",
+      "sha256": "fa2f7ba4915464221cd71c7048e6eb71a920cf94c793332b4172d2ac353dd65a",
+      "bytes": 4703,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/skill-creator/scripts/quick_validate.py",
+      "git_blob_sha1": "6b04c4d715fcd00f36f3b8013875aa3ec58d8da2",
+      "sha256": "580ccffbd9d4370bc35bca22c551da0353424e248d7499e8cd578eaec67dfd75",
+      "bytes": 5419,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/skill-creator/scripts/test_package_skill.py",
+      "git_blob_sha1": "a994a79dd1f70130cb49bf5388099d7a7eba558a",
+      "sha256": "806e5a5dbca711b9f30dded0b4bc31dc233b85a0ab301caabdd36900d5db9788",
+      "bytes": 7771,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/skill-creator/scripts/test_quick_validate.py",
+      "git_blob_sha1": "1289745137110fc028456199fa14741c1c7dd1d9",
+      "sha256": "349258a18c0130f0bf11dd60d361abffa493e426355bc14df4d1d3fc09a46f8a",
+      "bytes": 4533,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/tmux/SKILL.md",
+      "git_blob_sha1": "854644bcaeb66e7eb8530f4e5e841882914d85b5",
+      "sha256": "8aeaa6f3dfe06d58e09721778b8c9e654bcbd47590f26f442c4dc87c9349c572",
+      "bytes": 2564,
+      "mode": "100644"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/tmux/scripts/find-sessions.sh",
+      "git_blob_sha1": "57f664fe0717d0270ce39a09113df146d8e679eb",
+      "sha256": "8df6ac8e5824b0fa4d791235bd944ce86b0d12dcbf98af7abeb6d6de50e96823",
+      "bytes": 2983,
+      "mode": "100755"
+    },
+    {
+      "project": "openclaw",
+      "source_path": "skills/tmux/scripts/wait-for-text.sh",
+      "git_blob_sha1": "05e754edf25459b256c86ddc1ca4cd6f457552b8",
+      "sha256": "b7efb785d3f2a4f1194e2ae18d7191135ad5a2fff4f08e6a4c7ad8412f3a7309",
+      "bytes": 2294,
+      "mode": "100755"
+    }
+  ]
+}

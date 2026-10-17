@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "purpose": "填写主机主要用途；此文件是模板，不是已确认授权",
+  "roots": [],
+  "exclude_names": [".git", "__pycache__", ".demo", ".recycle"],
+  "residents": [],
+  "directory_rules": [],
+  "limits": {
+    "scan_entries": 5000,
+    "scan_seconds": 3,
+    "scan_depth": 32,
+    "processes": 200,
+    "command_bytes": 262144,
+    "file_bytes": 1048576,
+    "total_bytes": 4194304,
+    "output_bytes": 32768,
+    "change_records": 96,
+    "sample_records": 48,
+    "operation_records": 32,
+    "retention_hours": 48
+  }
+}

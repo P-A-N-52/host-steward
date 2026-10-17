@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.demo/
+.local-state/
+
+# 现场材料含真实主机与网络细节，仅本地保留，不随仓库公开
+references/field-experiment-conclusions-2026-10-17.md
+references/host-steward-field-feedback-ziye-2026-10-17.md
+references/host-steward-field-experiments-ziye-2026-10-17.md
