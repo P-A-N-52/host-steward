@@ -1,4 +1,4 @@
-"""Minimal, fail-closed readers for evolving runtime state files."""
+"""运行状态的读取与结构校验；无效记录在动作前阻断。"""
 
 import math
 import os
@@ -11,7 +11,7 @@ from state import StewardError
 
 def require(condition, name, detail):
     if not condition:
-        raise StewardError(f"{name} 结构错误：{detail}；保留原文件")
+        raise StewardError(f"{name} 结构错误：{detail}；保留原状态")
 
 
 def integer(value):
@@ -174,6 +174,8 @@ def read_current(store):
             require(isinstance(process, dict) and isinstance(process.get("identity"), str)
                     and integer(process.get("rss_bytes")) and process["rss_bytes"] >= 0,
                     name, "进程样本 identity/rss_bytes 无效")
+        if row.get("host") is not None:
+            require(isinstance(row["host"], dict), name, "samples 行 host 必须是对象")
     seen = set()
     validate_pending(data.get("pending", []), name, "pending", seen)
     validate_pending(data.get("pending_overflow", []), name, "pending_overflow", seen)

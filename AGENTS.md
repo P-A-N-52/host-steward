@@ -31,7 +31,8 @@ python3 tools/steward.py demo --workspace /tmp/新空目录  # 演示回归
 | `tools/steward.py` | 本地 agent 调用的 Python 命令入口 |
 | `files.py`、`events.py` | 扫描、对象身份、变化聚合与原生事件 |
 | `observe.py` | 有预算的子进程观测 |
-| `state.py`、`state_schema.py` | 状态读写、容量控制与结构校验 |
+| `state.py`、`database.py`、`state_schema.py` | 状态文件与 SQLite 存储、容量控制与结构校验 |
+| `storage_tools.py` | 旧 JSON 显式迁移、数据导出与数据库备份 |
 | `inventory.py`、`investigate.py` | 长期档案、文件引用与服务调查 |
 | `maintain.py`、`demo.py` | 维护动作与隔离演示 |
 

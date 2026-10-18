@@ -15,7 +15,7 @@ from files import canonical_path, compare, is_canonical_path, scan, within
 from inventory import query, read_definition, register
 from investigate import inspect_target
 from maintain import annotate, quarantine, restore
-from observe import command, observe
+from observe import command, observe, sample_facts
 from state import PolicyChangedError, Store, StewardError, decode, encode, read_regular_bytes
 from state_schema import read_current, read_operations
 
@@ -140,7 +140,7 @@ def initialize(directory, roots, purpose):
     with store.lock():
         if any(path.name != ".lock" for path in store.path.iterdir()):
             raise StewardError("初始化仅接受空状态目录；已有记录或指导必须保留，请先核对恢复，不覆盖或重置")
-        payloads = {"inventory.json": encode({"version": 1, "resources": {}})}
+        payloads = {"steward.sqlite3": store.empty_database_bytes()}
         for file in sorted((PROJECT / "guidance").rglob("*.md")):
             payloads["guidance/" + str(file.relative_to(PROJECT / "guidance"))] = read_regular_bytes(file, policy["limits"]["file_bytes"])
         payloads["adaptation.json"] = encode({"source_version": "0.2.0-demo", "removed_sections": [],
@@ -148,7 +148,8 @@ def initialize(directory, roots, purpose):
         payloads["host.json"] = encode(policy)
         if len(payloads["host.json"]) > min(32768, policy["limits"]["file_bytes"]):
             raise StewardError("初始化约定超过 host.json 或状态单文件预算")
-        if any(len(payload) > policy["limits"]["file_bytes"] for payload in payloads.values()):
+        if any(len(payload) > policy["limits"]["file_bytes"]
+               for name, payload in payloads.items() if name != "steward.sqlite3"):
             raise StewardError("初始化内容超过状态单文件预算")
         directories = sorted({parent for name in payloads for parent in Path(name).parents if parent != Path(".")},
                              key=lambda path: (len(path.parts), str(path)))
@@ -340,7 +341,11 @@ def patrol(store, policy):
         policy = refresh_policy_locked(store)
         previous = read_current(store)
         if not isinstance(previous, dict) or (previous and previous.get("version") != 1):
-            raise StewardError("巡检状态格式或版本不符，保留原文件")
+            raise StewardError("巡检状态格式或版本不符，保留原状态")
+        if not store.capacity()["writable"]:
+            raise StewardError(
+                "状态已到可写容量上限，本轮先不观察；用 status 查看 capacity 中的上限与余量，"
+                "核对采集范围、记录保留或本机 total_bytes 后重试")
         events = native_events(policy, previous)
         host = observe(policy)
         observation_gaps = [{"kind": name, "reason": host[name].get("reason", "unavailable")}
@@ -379,9 +384,10 @@ def patrol(store, policy):
                   if now - row["observed_at"] <= policy["limits"]["retention_hours"] * 3600] + changes
         dropped = max(0, len(recent) - policy["limits"]["change_records"])
         recent = recent[-policy["limits"]["change_records"]:]
-        samples = previous.get("samples", []) + [{"time": now, "processes": [
-            {key: row[key] for key in ["identity", "rss_bytes", "cpu_percent"]}
-            for row in host["processes"]["items"][:20]]}]
+        samples = previous.get("samples", []) + [{"time": now,
+                                                  "processes": [{key: row[key] for key in ["identity", "rss_bytes", "cpu_percent"]}
+                                                                for row in host["processes"]["items"][:20]],
+                                                  "host": sample_facts(host)}]
         samples = samples[-policy["limits"]["sample_records"]:]
         pending = list(pending_items(previous).values())
         history = list(previous.get("pending_history", []))
@@ -411,15 +417,26 @@ def patrol(store, policy):
                       "pending_history": history, "pending_history_dropped": history_dropped})
         ensure_policy_locked(store, policy)
         store.write("current.json", state)
+        capacity = store.capacity()
+        host_summary = {key: host[key] for key in
+                        ["system", "architecture", "boot", "cpu", "memory", "gpu", "model_usage",
+                         "storage", "diskio", "network", "power"] if key in host}
+        network = host_summary.get("network")
+        if isinstance(network, dict) and isinstance(network.get("interfaces"), dict) \
+                and len(network["interfaces"].get("items", [])) > 6:
+            ranked = sorted(network["interfaces"]["items"],
+                            key=lambda row: row.get("ibytes", 0) + row.get("obytes", 0), reverse=True)
+            host_summary["network"] = dict(
+                network, interfaces=dict(network["interfaces"], items=ranked[:6], trimmed_for_report=True))
         overview = sorted(directory_index, key=lambda row: (-row["bytes"], row["path"]))[:12]
         return {"status": "observed", "state": str(store.path), "last_run": state["last_run"],
-                "host": {key: host[key] for key in ["system", "architecture", "cpu", "memory", "gpu", "model_usage", "storage"]},
+                "host": host_summary,
                 "processes": dict(host["processes"], items=host["processes"]["items"][:8]),
                 "services": dict(host["services"], items=host["services"]["items"][:12]),
                 "events": events, "directories": overview, "changes": changes, "gaps": delta["gaps"],
                 "observation_gaps": observation_gaps, "coverage_scope": coverage_scope,
                 "new_baselines": delta["new_baselines"], "pending": pending, "pending_history_dropped": history_dropped,
-                "change_records_dropped": dropped, "state_bytes": store.usage(),
+                "change_records_dropped": dropped, "capacity": capacity, "state_bytes": capacity["state_bytes"],
                 "observations_changed": bool(changes or delta["gaps"] != previous.get("coverage_gaps", [])
                                              or observation_gaps != previous.get("observation_gaps", []) or delta["new_baselines"])}
 
@@ -443,7 +460,8 @@ def main():
     init.add_argument("--state", required=True)
     init.add_argument("--root", action="append", required=True)
     init.add_argument("--purpose", required=True)
-    for action in ["patrol", "note", "quarantine", "restore", "track", "resolve", "status", "inventory", "inspect"]:
+    for action in ["patrol", "note", "quarantine", "restore", "track", "resolve", "status", "inventory", "inspect",
+                   "migrate", "export", "backup"]:
         child = commands.add_parser(action)
         child.add_argument("--state", required=True)
         if action in ["track", "resolve"]:
@@ -453,8 +471,13 @@ def main():
             child.add_argument("--path", required=True)
         if action == "restore":
             child.add_argument("--operation", required=True)
-        if action in ["note", "quarantine", "restore"]:
+        if action in ["note", "quarantine", "restore", "migrate"]:
             child.add_argument("--apply", action="store_true", help="执行本机约定允许的已展示动作")
+        if action == "export":
+            child.add_argument("--dataset", choices=["current", "inventory", "operations"], required=True)
+            child.add_argument("--output", help="独占创建 JSON 导出文件；省略时按输出预算返回")
+        if action == "backup":
+            child.add_argument("--output", required=True, help="在状态目录之外独占创建 SQLite 备份")
         if action == "patrol":
             child.add_argument("--quiet", action="store_true")
         if action in ["status", "inventory"]:
@@ -496,7 +519,15 @@ def main():
         def policy_guard():
             ensure_policy_locked(store, policy)
 
-        if args.action == "inventory":
+        if args.action in ["migrate", "export", "backup"]:
+            from storage_tools import backup_database, export_dataset, migrate_json
+            if args.action == "migrate":
+                report = migrate_json(store, args.apply, policy_guard)
+            elif args.action == "export":
+                report = export_dataset(store, args.dataset, args.output)
+            else:
+                report = backup_database(store, args.output)
+        elif args.action == "inventory":
             report = register(store, read_definition(args.record)) if args.record else query(
                 store, policy, args.id, args.path, args.limit, args.offset)
         elif args.action == "inspect":
@@ -518,7 +549,9 @@ def main():
             pending = list(pending_items(current).values())
             scopes = {root: coverage for root, coverage in current.get("coverage_scope", {}).items()
                       if path is None or within(root, path) or within(path, root)}
-            report = {"last_run": current.get("last_run"),
+            capacity = store.capacity()
+            storage = dict(store.database_info(), capacity=capacity)
+            report = {"storage": storage, "last_run": current.get("last_run"),
                       "coverage_scope": dict(sorted(scopes.items())[args.offset:args.offset + args.limit]),
                       "coverage_scope_count": len(scopes), "pending": pending[args.offset:args.offset + args.limit],
                       "pending_count": len(pending),
@@ -529,7 +562,7 @@ def main():
                       "directory_count": len(directories), "change_count": len(changes),
                       "directory_index": directories[args.offset:args.offset + args.limit],
                       "recent_changes": changes[args.offset:args.offset + args.limit],
-                      "operations": read_operations(store)[-args.limit:], "state_bytes": store.usage()}
+                      "operations": read_operations(store)[-args.limit:], "state_bytes": capacity["state_bytes"]}
         elif args.action in ["track", "resolve"]:
             report = update_pending(store, args.key, args.reason, resolve=args.action == "resolve")
         elif args.action == "note":

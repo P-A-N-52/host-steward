@@ -10,9 +10,13 @@ from unittest.mock import patch
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "tools"))
 from files import identity
-from state import StewardError
+from state import StewardError, encode
 from state_schema import read_current
 from steward import initialize, patrol, validate
+
+
+def dataset_snapshot(store, name, default=None):
+    return encode(store.read(name, default))
 
 
 class PolicyScopeTests(unittest.TestCase):
@@ -71,7 +75,7 @@ class PolicyScopeTests(unittest.TestCase):
                 self.assertEqual(json.loads(result.stderr)["status"], "blocked")
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertEqual(target.read_text(), "keep")
-                self.assertFalse(self.store.target("operations.json").exists())
+                self.assertEqual(self.store.read("operations.json", []), [])
                 self.assertEqual(self.store.target("host.json").read_bytes(), before)
 
     def test_nested_distinct_rules_keep_longest_path_and_normal_recovery(self):
@@ -203,13 +207,13 @@ class PolicyScopeTests(unittest.TestCase):
         for index, current in enumerate(payloads):
             with self.subTest(case=index):
                 self.store.write("current.json", current)
-                before = self.store.target("current.json").read_bytes()
+                before = dataset_snapshot(self.store, "current.json")
                 with self.assertRaises(StewardError):
                     read_current(self.store)
                 result = self.cli("status")
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
-                self.assertEqual(self.store.target("current.json").read_bytes(), before)
+                self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
 
 
 if __name__ == "__main__":

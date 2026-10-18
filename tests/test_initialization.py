@@ -38,14 +38,23 @@ class InitializationTests(unittest.TestCase):
         return {"guidance/" + str(path.relative_to(source)): path.read_bytes()
                 for path in sorted(source.rglob("*.md"))}
 
-    def _payloads(self, policy):
-        payloads = {"inventory.json": encode({"version": 1, "resources": {}})}
+    def _payloads(self, store, policy):
+        payloads = {"steward.sqlite3": Store.empty_database_bytes()}
         payloads.update(self._guidance())
         payloads["adaptation.json"] = encode(
             {"source_version": "0.2.0-demo", "removed_sections": [],
              "reason": "保留通用说明；具体能力和权限以观测结果、本机约定为准"})
         payloads["host.json"] = encode(policy)
         return payloads
+
+    def _assert_payloads(self, store, policy):
+        for name, payload in self._payloads(store, policy).items():
+            if name == "steward.sqlite3":
+                self.assertTrue(store.database_exists())
+                store.check_database()
+                self.assertEqual(store.database_info()["datasets"], {})
+            else:
+                self.assertEqual(store.target(name).read_bytes(), payload)
 
     def _assert_only_lock(self, directory):
         self.assertEqual(set(self._snapshot(directory)), {".lock"})
@@ -73,8 +82,7 @@ class InitializationTests(unittest.TestCase):
                     directory.mkdir()
                     (directory / ".lock").write_bytes(lock_bytes)
                 store, policy = initialize(directory, [self.root], "初始化测试")
-                for name, payload in self._payloads(policy).items():
-                    self.assertEqual(store.target(name).read_bytes(), payload)
+                self._assert_payloads(store, policy)
                 loaded_store, loaded_policy = load(directory)
                 self.assertEqual(loaded_store.path, store.path)
                 self.assertEqual(loaded_policy, policy)
@@ -111,6 +119,7 @@ class InitializationTests(unittest.TestCase):
         directory.mkdir()
         old = {
             ".lock": b"old lock",
+            "steward.sqlite3": Store.empty_database_bytes(),
             "inventory.json": b"old inventory\x00",
             "current.json": b"old current",
             "operations.json": b"old operations",
@@ -130,9 +139,7 @@ class InitializationTests(unittest.TestCase):
         directory = self.base / "cli-state"
         store, _ = initialize(directory, [self.root], "第一次初始化")
         old = {
-            "inventory.json": b"old knowledge",
-            "current.json": b"old current",
-            "operations.json": b"old operations",
+            "steward.sqlite3": Store.empty_database_bytes(),
             "guidance/setup.md": b"old local guidance",
         }
         for name, payload in old.items():
@@ -190,8 +197,7 @@ class InitializationTests(unittest.TestCase):
         self.assertFalse((directory / "guidance").exists())
         self.assertFalse(list(directory.rglob(".writing-*")))
         store, policy = initialize(directory, [self.root], "可重试初始化")
-        for name, payload in self._payloads(policy).items():
-            self.assertEqual(store.target(name).read_bytes(), payload)
+        self._assert_payloads(store, policy)
 
     def test_directory_fsync_failure_after_host_link_uses_created_metadata_for_rollback(self):
         directory = self.base / "fsync-state"
@@ -214,7 +220,7 @@ class InitializationTests(unittest.TestCase):
             load(directory)
 
     def test_foreign_same_name_is_never_overwritten_or_removed(self):
-        for name in ("inventory.json", "host.json"):
+        for name in ("steward.sqlite3", "host.json"):
             with self.subTest(name=name):
                 directory = self.base / ("foreign-" + name.split(".")[0])
                 foreign = ("foreign " + name).encode()
@@ -232,11 +238,11 @@ class InitializationTests(unittest.TestCase):
                         initialize(directory, [self.root], "外来文件竞争")
                 self.assertEqual((directory / name).read_bytes(), foreign)
                 self.assertFalse(list(directory.rglob(".writing-*")))
-                if name == "inventory.json":
+                if name == "steward.sqlite3":
                     self.assertEqual(set(self._snapshot(directory)), {".lock", name})
                 else:
-                    self.assertTrue((directory / "inventory.json").exists())
                     self.assertTrue((directory / "adaptation.json").exists())
+                    self.assertTrue((directory / "steward.sqlite3").exists())
                     self.assertTrue((directory / "guidance").is_dir())
                     self.assertIn("残留", str(caught.exception))
 
@@ -256,7 +262,7 @@ class InitializationTests(unittest.TestCase):
             with self.assertRaisesRegex(StewardError, "guidance/inventory.md"):
                 initialize(directory, [self.root], "外部改写")
         self.assertEqual((directory / "guidance/inventory.md").read_bytes(), b"external rewrite survives\n")
-        self.assertFalse((directory / "inventory.json").exists())
+        self.assertFalse((directory / "steward.sqlite3").exists())
         self.assertFalse((directory / "guidance/patrol.md").exists())
         self.assertFalse((directory / "adaptation.json").exists())
         self.assertFalse((directory / "host.json").exists())

@@ -66,6 +66,9 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn(str(root), [row["path"] for row in outputs["status"]["directory_index"]])
             self.assertEqual(outputs["query"]["resources"][0]["definition"], definition)
             self.assertTrue((state / "guidance/patrol.md").is_file())
+            self.assertTrue((state / "steward.sqlite3").is_file())
+            self.assertFalse((state / "current.json").exists())
+            self.assertFalse((state / "inventory.json").exists())
             self.assertFalse((state / "operations.json").exists())
             self.assertEqual(target.read_text(encoding="utf-8"), "需要长期保留的原始资料")
             self.assertEqual({path.name for path in runtime.iterdir()},

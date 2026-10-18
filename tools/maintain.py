@@ -87,7 +87,7 @@ def annotate(store, policy, directory, apply=False, policy_guard=None):
         raise StewardError("此目录未授权写入目录说明")
     target = protect_path(store, path / "AGENTS.md")
     original = read_note(target)
-    block = f"{BEGIN}\n# 本目录用途与维护约定\n\n- 用途：{rule['purpose']}\n- 保留类别：{rule['kind']}\n- 规则来源：本机管理约定的 directory_rules，本说明不新增授权。\n- 索引入口：{store.path / 'current.json'} 的 directory_index。\n{END}"
+    block = f"{BEGIN}\n# 本目录用途与维护约定\n\n- 用途：{rule['purpose']}\n- 保留类别：{rule['kind']}\n- 规则来源：本机管理约定的 directory_rules，本说明不新增授权。\n- 索引入口：本机状态 {store.path}，使用 status --path 查询 directory_index。\n{END}"
     if BEGIN in original or END in original:
         if original.count(BEGIN) != 1 or original.count(END) != 1 or original.index(BEGIN) > original.index(END):
             raise StewardError("已有 Steward 标记不完整，保留原文并停止")
@@ -104,7 +104,6 @@ def annotate(store, policy, directory, apply=False, policy_guard=None):
     if text == original:
         return {"applied": False, "reason": "说明已与本机约定一致"}
     protect_path(store, target)
-    store.check_capacity(8192)
     save_operation(store, operation)
     try:
         protect_path(store, target)
@@ -172,7 +171,6 @@ def quarantine(store, policy, source, apply=False, policy_guard=None):
     protect_path(store, path)
     protect_path(store, recycle)
     protect_path(store, destination)
-    store.check_capacity(8192)
     save_operation(store, operation)
     try:
         protect_path(store, path)
@@ -232,7 +230,6 @@ def restore(store, policy, operation_id, apply=False, policy_guard=None):
         return {"applied": False, "plan": {"restore": str(target), "to": str(source)}}
     protect_path(store, source)
     protect_path(store, target)
-    store.check_capacity(8192)
     if operation["status"] == "quarantined":
         operation.update(status="restoring")
         save_operation(store, operation)

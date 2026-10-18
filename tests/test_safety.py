@@ -11,7 +11,11 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "tools"))
 from files import identity
 from maintain import annotate, fingerprint, quarantine, restore
-from state import Store, StewardError, read_regular_bytes
+from state import Store, StewardError, encode, read_regular_bytes
+
+
+def dataset_snapshot(store, name, default=None):
+    return encode(store.read(name, default))
 
 
 class SafetyTests(unittest.TestCase):
@@ -30,7 +34,9 @@ class SafetyTests(unittest.TestCase):
         return result
 
     def store(self, directory=None, **limits):
-        return Store(directory or self.base / "state", self.limits(**limits))
+        store = Store(directory or self.base / "state", self.limits(**limits))
+        store.initialize_database()
+        return store
 
     def policy(self, root=None, extra_rules=()):
         root = root or self.root
@@ -137,8 +143,7 @@ class SafetyTests(unittest.TestCase):
     def test_note_rejects_fifo_directory_and_link_without_operation(self):
         store = self.store()
         policy = self.policy()
-        operations = store.target("operations.json")
-        operations.write_bytes(b"[]\n")
+        store.write("operations.json", [])
         cases = []
 
         fifo = self.root / "AGENTS.md"
@@ -147,20 +152,20 @@ class SafetyTests(unittest.TestCase):
         for target in cases:
             for apply in (False, True):
                 with self.subTest(kind="fifo", apply=apply):
-                    before = operations.read_bytes()
+                    before = dataset_snapshot(store, "operations.json")
                     with self.assertRaises(StewardError):
                         annotate(store, policy, self.root, apply)
-                    self.assertEqual(operations.read_bytes(), before)
+                    self.assertEqual(dataset_snapshot(store, "operations.json"), before)
             target.unlink()
 
         directory = self.root / "AGENTS.md"
         directory.mkdir()
         for apply in (False, True):
             with self.subTest(kind="directory", apply=apply):
-                before = operations.read_bytes()
+                before = dataset_snapshot(store, "operations.json")
                 with self.assertRaises(StewardError):
                     annotate(store, policy, self.root, apply)
-                self.assertEqual(operations.read_bytes(), before)
+                self.assertEqual(dataset_snapshot(store, "operations.json"), before)
         directory.rmdir()
 
         outside = self.base / "outside-note"
@@ -169,10 +174,10 @@ class SafetyTests(unittest.TestCase):
         link.symlink_to(outside)
         for apply in (False, True):
             with self.subTest(kind="link", apply=apply):
-                before = operations.read_bytes()
+                before = dataset_snapshot(store, "operations.json")
                 with self.assertRaises(StewardError):
                     annotate(store, policy, self.root, apply)
-                self.assertEqual(operations.read_bytes(), before)
+                self.assertEqual(dataset_snapshot(store, "operations.json"), before)
         link.unlink()
 
     def test_nested_state_is_not_a_maintainable_object_or_note_subtree(self):
@@ -182,13 +187,15 @@ class SafetyTests(unittest.TestCase):
                       "allow_notes": True, "allow_quarantine": True, "retention_days": 0,
                       "recycle_bytes": 1024 * 1024, "directory_id": identity(state_path.stat())}
         policy = self.policy(extra_rules=[state_rule])
-        names = ["host.json", "current.json", "inventory.json", "operations.json", ".lock"]
-        for name in names:
-            store.target(name).write_bytes(b"{}\n")
+        names = ["host.json", "steward.sqlite3", ".lock"]
+        store.target("host.json").write_bytes(b"{}\n")
+        store.write("current.json", {})
+        with store.lock():
+            pass
         note_subtree = state_path / "notes"
         note_subtree.mkdir()
         before = {name: store.target(name).read_bytes() for name in names}
-        operation_before = before["operations.json"]
+        operation_before = dataset_snapshot(store, "operations.json")
 
         for apply in (False, True):
             with self.subTest(action="note-state", apply=apply):
@@ -202,7 +209,7 @@ class SafetyTests(unittest.TestCase):
                     with self.assertRaises(StewardError):
                         quarantine(store, policy, store.target(name), apply)
         self.assertEqual({name: store.target(name).read_bytes() for name in names}, before)
-        self.assertEqual(store.target("operations.json").read_bytes(), operation_before)
+        self.assertEqual(dataset_snapshot(store, "operations.json"), operation_before)
         self.assertFalse((state_path / ".recycle").exists())
 
     def test_restore_rejects_state_source_and_state_target_without_changes(self):
@@ -217,13 +224,13 @@ class SafetyTests(unittest.TestCase):
         operation = {"id": operation_id, "kind": "quarantine", "source": str(source),
                      "target": str(target), "identity": fingerprint(target), "status": "quarantined"}
         store.write("operations.json", [operation])
-        before = store.target("operations.json").read_bytes()
+        before = dataset_snapshot(store, "operations.json")
         for apply in (False, True):
             with self.subTest(side="source", apply=apply), self.assertRaises(StewardError):
                 restore(store, policy, operation_id, apply)
         self.assertTrue(source.exists())
         self.assertTrue(target.exists())
-        self.assertEqual(store.target("operations.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(store, "operations.json"), before)
 
         state_path = self.root / ".recycle" / operation_id
         target_store = self.store(state_path)
@@ -233,13 +240,13 @@ class SafetyTests(unittest.TestCase):
         target_operation = {"id": operation_id, "kind": "quarantine", "source": str(target_source),
                             "target": str(target), "identity": fingerprint(target), "status": "quarantined"}
         target_store.write("operations.json", [target_operation])
-        target_before = target_store.target("operations.json").read_bytes()
+        target_before = dataset_snapshot(target_store, "operations.json")
         for apply in (False, True):
             with self.subTest(side="target", apply=apply), self.assertRaises(StewardError):
                 restore(target_store, policy, operation_id, apply)
         self.assertFalse(target_source.exists())
         self.assertTrue(target.exists())
-        self.assertEqual(target_store.target("operations.json").read_bytes(), target_before)
+        self.assertEqual(dataset_snapshot(target_store, "operations.json"), target_before)
 
     def test_normal_quarantine_and_restore_still_work(self):
         store = self.store()

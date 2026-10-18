@@ -118,7 +118,7 @@ def run_demo(workspace):
     small_limits = dict(policy["limits"], scan_entries=2)
     incomplete = scan(policy["roots"], small_limits, policy["exclude_names"], str(store.path))
     limited_delta = compare(current["baselines"], incomplete, policy["limits"]["change_records"])
-    before = store.target("current.json").read_bytes()
+    before = store.read("current.json")
     limited_store = Store(store.path, dict(policy["limits"], total_bytes=store.usage() + 1))
     try:
         limited_store.write("current.json", {"would_replace": True})
@@ -150,7 +150,7 @@ def run_demo(workspace):
         "quarantine_verified": move_verified,
         "restore_verified": restored["applied"] and temporary.read_text().startswith("已结束"),
         "partial_scan_does_not_report_deletion": bool(limited_delta["gaps"]) and not limited_delta["changes"],
-        "quota_preserves_last_state": quota_rejected and store.target("current.json").read_bytes() == before,
+        "quota_preserves_last_state": quota_rejected and store.read("current.json") == before,
         "independent_process_reads_durable_knowledge": readback["definition"]["retention"] == "长期保留，不按年龄回收",
         "inspection_does_not_refresh_old_knowledge": readback["review_due"] and readback["definition"]["evidence_at"] == old,
         "inspection_evidence_is_saved": readback["inspection"]["observed_at"] == investigation["observed_at"],
@@ -167,7 +167,8 @@ def run_demo(workspace):
                 "final": final["last_run"]["coverage_complete"]}
     summary = {"status": "demo_verified", "verified": True, "demo_version": 2, "observed_at": observed_at,
                "platform": platform.system(), "workspace": str(workspace), "checks": checks,
-               "state_bytes": store.usage(), "events": final["events"], "sample_limits": policy["limits"],
+               "state_bytes": store.usage(), "capacity": store.capacity(), "events": final["events"],
+               "sample_limits": policy["limits"],
                "file_coverage": coverage, "observations": observations, "observation_gaps": final["observation_gaps"],
                "gaps": second["gaps"], "changes": second["changes"], "report": str(workspace / "report.md")}
     lines = ["# Host Steward 0.2 Demo", "", "已完成真实样例文件的巡检、变化对比、目录说明、回收与恢复，以及资源档案、只读调查和独立进程读回。",
@@ -191,9 +192,8 @@ def run_demo(workspace):
         lines.append(f"| {Path(row['path']).relative_to(root) or '.'} | {row['added']} | {row['removed']} | {row['modified']} | {row['moved']} | {row['byte_delta']:+,} B |")
     lines += ["", "父子目录体积重叠，不能相加；同卷回收已明确记录释放空间为 0。", "",
               "## 查看结果", "", "- `state/host.json`：示例约定、常驻规则与预算。",
-              "- `state/current.json`：本机观测、目录索引、配置窗口内变化、待核验问题。",
-              "- `state/inventory.json`：长期资源用途、来源、复核期限与最新调查；新进程已读回，新 agent 会话需另验。",
-              "- `state/operations.json`：计划、回收与恢复的验证记录。",
+              "- `state/steward.sqlite3`：本机观测、目录索引、近期变化、待办、长期知识与操作恢复证据。",
+              "- 使用 status / inventory 查询，export --dataset current、inventory 或 operations 导出逻辑数据。",
               "- `sample-host/cold/AGENTS.md`：用户原文与新增 Steward 说明。", "",
               "## 当前范围", "", "macOS FSEvents 仅提供线索，仍对配置 roots 做有界快照核验；Linux 当前只做快照对比。",
               "尚未实现自动全机分批续扫、Linux 实时监听、GPU 采样、服务功能探测、自动日志修复与最终删除。"]

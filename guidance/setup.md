@@ -51,14 +51,35 @@ python3 /skill目录/tools/steward.py patrol --state /绝对路径/本机状态
 
 ```text
 host.json                      本机用途、观察范围、授权、保护与预算约定
-inventory.json                 长期资源知识与最新调查
+steward.sqlite3                 动态状态：资源档案、观测、基线、事项与操作证据
 guidance/                      本机指导副本
 adaptation.json                指导来源版本与裁剪记录
 ```
 
-首轮 `patrol` 创建 `current.json`，保存当前事实、目录索引、近期变化、采样与待核验事项；实际执行维护时创建 `operations.json`，保存操作计划、结果和恢复证据，预览仅返回计划。两者在对应动作之前缺失属正常情况。已有状态的修复、初始化失败与残留处理见 [recovery](situations/recovery.md)。
+初始化建立空数据库。首轮 `patrol` 写入 current 数据集，保存当前事实、目录索引、近期变化、采样与待核验事项；资源登记写入 inventory，实际维护写入 operations，保存计划、结果和恢复证据，预览仅返回计划。数据库内尚无对应数据集时按空记录查询。已有状态的数据库缺失、损坏或初始化残留按 [recovery](situations/recovery.md) 处理。
 
 接管时用独立进程验证能按上述路径读回规则与知识，并确认本地 agent 的后续会话能找到这两个入口。后续调用方式沿用 agent 的现有能力。查询时区分检索失败、尚未覆盖和没有匹配。
+
+## 旧状态迁移与导出
+
+已接管主机仍使用 `current.json`、`inventory.json`、`operations.json` 时，先核对原状态路径和本机约定，再预览迁移：
+
+```sh
+python3 /skill目录/tools/steward.py migrate --state /本机状态
+python3 /skill目录/tools/steward.py migrate --state /本机状态 --apply
+```
+
+迁移在锁内校验旧输入，在临时数据库中按实际数据核对容量并读回，再独占发布正式库。旧 JSON 保留原字节，之后普通命令只使用 SQLite。`sqlite-migration.json` 保存发布凭据；它和旧文件一同计入容量。容量不足时迁移在发布前停止并保留旧数据；只有临时库残留时，核对失败原因后删除该临时库可重试。核对迁移结果并取得备份后，旧 JSON 与凭据可一同清理，释放的容量由 agent 判断。本机约定与已经裁剪的指导继续沿用，升级时按指导差异复核。发布中断的核对方法见 [recovery](situations/recovery.md#迁移中断与数据库恢复)。
+
+平时使用 `status`、`inventory` 查询需要的内容；完整 current、inventory 或 operations 可导出为 JSON。外部输出路径的父目录需已存在，目标文件需尚不存在：
+
+```sh
+python3 /skill目录/tools/steward.py export --state /本机状态 --dataset current --output /外部目录/current-export.json
+python3 /skill目录/tools/steward.py export --state /本机状态 --dataset operations
+python3 /skill目录/tools/steward.py backup --state /本机状态 --output /外部目录/steward-backup.sqlite3
+```
+
+导出包含数据集名称、来源、导出时间与 data；省略 `--output` 时结果受工具输出预算限制。`backup` 使用 SQLite 备份接口并校验数据库，生成动态状态的一致快照；备份写在状态区外，工具核对目标目录可用空间，时间使用本轮时间预算。`host.json`、`adaptation.json` 与本机指导另行保存；备份的长期保留由本机既有安排管理。
 
 ## 配置本机约定
 
@@ -74,9 +95,11 @@ adaptation.json                指导来源版本与裁剪记录
 
 ## 预算与指导更新
 
-初始预算来自 skill 目录的 `state/host.example.json`，仅 `init` 读取；运行时使用本机 `host.json.limits`。预算分别限制扫描条数、时间与深度，进程采样与命令读取，状态单文件与总容量，工具输出，以及变化、采样和操作记录的条数与保留窗口。状态总容量包含替换时的临时文件。
+初始预算来自 skill 目录的 `state/host.example.json`，仅 `init` 读取；运行时使用本机 `host.json.limits`。预算分别限制扫描条数、时间与深度，进程采样与命令读取，状态容量、工具输出，以及变化、采样和操作记录的条数与保留窗口。`file_bytes` 限制普通状态文件和数据库单条 JSON 记录，例如一项资源、一份文件元数据或一项操作。完整 current、inventory、operations 的读取与编码使用 `total_bytes` 上限，整份 baseline 不再受旧单文件上限约束。
 
-结合硬件容量、磁盘读写、前台负载和实际巡检开销调整预算；达到限制时工具报告缺口或拒绝写入，先检查采集范围与记录方式。
+整个状态区受 `total_bytes` 限制，包含数据库、事务日志、迁移临时库和保留的旧 JSON。数据库可长期写入的上限还要为回滚日志留空间，因此会小于 `total_bytes`；`status` 与 `patrol` 的 `capacity` 给出上限与当前余量，判断是否继续写入或调整采集范围时读它。容量不足时写入被拒绝并保留上次已提交状态，`migrate` 会在发布前按实际数据停下。数据库有页和索引开销，体积未必小于 JSON；观察后续轮次时，结合记录条数、覆盖范围与实际状态占用判断增长原因。
+
+结合硬件容量、磁盘读写、前台负载和实际巡检开销调整预算；`total_bytes` 属于本机约定，达到限制时先看 `capacity` 与采集范围，再决定是否请用户确认新的预算。
 
 `init` 将全部通用指导复制到状态区。按本机情况裁剪后，在 `adaptation.json` 记录版本、删减内容和原因。skill 更新时对照差异复核本机指导，保留已确认的本机约定。模板与公共入口 `SKILL.md` 从已记录的 skill 目录读取，状态区副本中的专项链接用于本机指导之间跳转。
 

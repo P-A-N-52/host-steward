@@ -13,9 +13,16 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "tools"))
 from files import compare, identity, scan
 from maintain import annotate, quarantine, restore
-from observe import command, parse_processes
-from state import Store, StewardError
+from observe import (command, parse_battery, parse_boottime, parse_gpu_statistics, parse_iostat,
+                     parse_netstat_interfaces, parse_proc_net_dev, parse_proc_stat, parse_proc_tcp_states,
+                     parse_processes, parse_swapusage, parse_tcp_states, parse_thermal, parse_vm_counters,
+                     sample_facts)
+from state import Store, StewardError, decode, encode, read_regular_bytes
 from steward import initialize, update_pending
+
+
+def dataset_snapshot(store, name, default=None):
+    return encode(store.read(name, default))
 
 
 class StewardTests(unittest.TestCase):
@@ -319,30 +326,30 @@ class StewardTests(unittest.TestCase):
 
     def test_state_quota_keeps_old_file_and_no_temp(self):
         self.store.write("current.json", {"original": True})
-        before = self.store.target("current.json").read_bytes()
+        before = dataset_snapshot(self.store, "current.json")
         small = Store(self.store.path, dict(self.policy["limits"], total_bytes=self.store.usage() + 1))
         with self.assertRaises(StewardError):
             small.write("current.json", {"replaced": True})
-        self.assertEqual(self.store.target("current.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
         self.assertFalse(list(self.store.path.glob(".writing-*")))
 
-    def test_corrupt_state_is_not_replaced(self):
-        target = self.store.target("current.json")
+    def test_raw_json_corruption_is_not_replaced(self):
+        target = self.base / "raw-current.json"
         target.write_text("{bad")
-        with self.assertRaises(StewardError):
-            self.store.read("current.json")
+        with self.assertRaises(ValueError):
+            decode(read_regular_bytes(target, 128))
         self.assertEqual(target.read_text(), "{bad")
 
     def test_wrong_current_schema_is_blocked_before_observation(self):
         from unittest.mock import patch
         from steward import patrol
         self.store.write("current.json", {"version": 1, "baselines": []})
-        before = self.store.target("current.json").read_bytes()
+        before = dataset_snapshot(self.store, "current.json")
         with patch("steward.native_events") as events:
             with self.assertRaises(StewardError):
                 patrol(self.store, self.policy)
         events.assert_not_called()
-        self.assertEqual(self.store.target("current.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
 
     def test_minimal_v1_and_unknown_top_level_are_preserved(self):
         from unittest.mock import patch
@@ -371,21 +378,21 @@ class StewardTests(unittest.TestCase):
         for key, value in invalid:
             with self.subTest(key=key):
                 self.store.write("current.json", {"version": 1, key: value})
-                before = self.store.target("current.json").read_bytes()
+                before = dataset_snapshot(self.store, "current.json")
                 with self.assertRaises(StewardError):
                     read_current(self.store)
-                self.assertEqual(self.store.target("current.json").read_bytes(), before)
+                self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
         self.store.write("current.json", {"version": 1, "pending": [{"key": "same"}, {"key": "same"}]})
         with self.assertRaises(StewardError):
             read_current(self.store)
 
-    def test_store_rejects_duplicate_keys_and_nonfinite_numbers(self):
-        target = self.store.target("current.json")
+    def test_json_decoder_rejects_duplicate_keys_and_nonfinite_numbers(self):
+        target = self.base / "raw-current.json"
         for payload in ['{"version":1,"version":1}', '{"version":1,"value":1e309}', '{"version":1,"value":NaN}']:
             with self.subTest(payload=payload):
                 target.write_text(payload)
-                with self.assertRaises(StewardError):
-                    self.store.read("current.json")
+                with self.assertRaises(ValueError):
+                    decode(read_regular_bytes(target, 128))
                 self.assertEqual(target.read_text(), payload)
 
     def test_large_timestamp_is_blocked_before_observation_without_traceback(self):
@@ -400,7 +407,7 @@ class StewardTests(unittest.TestCase):
         for payload in payloads:
             with self.subTest(field=next(iter(payload))):
                 self.store.write("current.json", dict(version=1, **payload))
-                before = self.store.target("current.json").read_bytes()
+                before = dataset_snapshot(self.store, "current.json")
                 with self.assertRaises(StewardError):
                     read_current(self.store)
                 with patch("steward.observe") as observation, self.assertRaises(StewardError):
@@ -411,7 +418,7 @@ class StewardTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertEqual(json.loads(result.stderr)["status"], "blocked")
                 self.assertNotIn("Traceback", result.stderr)
-                self.assertEqual(self.store.target("current.json").read_bytes(), before)
+                self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
 
     def test_timestamp_guard_does_not_restrict_integer_file_metadata(self):
         from state_schema import read_current
@@ -444,7 +451,7 @@ class StewardTests(unittest.TestCase):
                     self.assertEqual(change["byte_delta"], 1 - amount)
                     self.assertIsNone(change["average_growth_bytes_per_second"])
                     self.assertEqual(change["growth_rate_gap"], "numeric_range")
-                    self.assertNotIn("Infinity", self.store.target("current.json").read_text())
+                    self.assertNotIn("Infinity", dataset_snapshot(self.store, "current.json").decode())
 
     def test_host_rejects_duplicate_keys_and_boolean_version(self):
         from steward import load
@@ -506,7 +513,7 @@ class StewardTests(unittest.TestCase):
         from unittest.mock import patch
         from steward import patrol
         self.store.write("current.json", {"version": 1})
-        before = self.store.target("current.json").read_bytes()
+        before = dataset_snapshot(self.store, "current.json")
         host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
                 "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
                 "services": {"available": True, "items": []}}
@@ -521,7 +528,7 @@ class StewardTests(unittest.TestCase):
              patch("steward.scan", side_effect=changing_scan):
             with self.assertRaises(StewardError):
                 patrol(self.store, self.policy)
-        self.assertEqual(self.store.target("current.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
 
     def test_main_uses_fresh_policy_for_quarantine(self):
         from unittest.mock import patch
@@ -584,13 +591,13 @@ class StewardTests(unittest.TestCase):
         operation = {"id": operation_id, "kind": "quarantine", "source": str(alias / "temporary"),
                      "target": str(target), "identity": fingerprint(target), "status": "quarantined"}
         self.store.write("operations.json", [operation])
-        before = self.store.target("operations.json").read_bytes()
+        before = dataset_snapshot(self.store, "operations.json")
         self.assertEqual(len(read_operations(self.store)), 1)
         for apply in (False, True):
             with self.subTest(apply=apply), self.assertRaises(StewardError):
                 restore(self.store, self.policy, operation_id, apply)
         self.assertEqual(target.read_text(), "recover me")
-        self.assertEqual(self.store.target("operations.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(self.store, "operations.json"), before)
 
     def test_quarantine_policy_guard_preserves_source(self):
         self.rule(self.root)
@@ -850,13 +857,13 @@ class StewardTests(unittest.TestCase):
         for payload in [{}, [{}]]:
             with self.subTest(payload=payload):
                 self.store.write("operations.json", payload)
-                before = self.store.target("operations.json").read_bytes()
+                before = dataset_snapshot(self.store, "operations.json")
                 with self.assertRaises(StewardError):
                     quarantine(self.store, self.policy, file, True)
                 with self.assertRaises(StewardError):
                     restore(self.store, self.policy, "0" * 32, True)
                 self.assertEqual(file.read_text(), "keep")
-                self.assertEqual(self.store.target("operations.json").read_bytes(), before)
+                self.assertEqual(dataset_snapshot(self.store, "operations.json"), before)
 
     def test_unknown_operation_kind_is_not_evicted(self):
         self.rule(self.root)
@@ -932,6 +939,301 @@ class StewardTests(unittest.TestCase):
             result = observe(self.policy)
         self.assertEqual(result["memory"]["total_bytes"], 1024000)
         self.assertEqual(result["memory"]["available_bytes"], 256000)
+
+    VM_STAT_TEXT = (
+        "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+        "Pages free:                               10895.\n"
+        "Pages active:                            156228.\n"
+        '"Translation faults":                 993691260.\n'
+        "Pages reactivated:                   348193356.\n"
+        "File-backed pages:                     112568.\n"
+        "Anonymous pages:                       197301.\n"
+        "Compressions:                         353850822.\n"
+        "Pageins:                               73830224.\n"
+        "Swapins:                                2590403.\n"
+        "Swapouts:                               3596212.\n"
+    )
+
+    def test_vm_counters_include_activity_events(self):
+        counters = parse_vm_counters(self.VM_STAT_TEXT)
+        self.assertEqual(counters["Pages free"], 10895)
+        self.assertEqual(counters["Translation faults"], 993691260)
+        self.assertEqual(counters["Swapins"], 2590403)
+        self.assertEqual(counters["Compressions"], 353850822)
+        self.assertNotIn("Mach Virtual Memory Statistics", counters)
+
+    def test_swapusage_parses_sizes(self):
+        parsed = parse_swapusage("total = 2048.00M  used = 692.44M  free = 1355.56M  (encrypted)")
+        self.assertEqual(parsed, {"total_bytes": 2147483648, "used_bytes": 726075965, "free_bytes": 1421407682})
+        self.assertIsNone(parse_swapusage("vm.swapusage: unknown"))
+        self.assertIsNone(parse_swapusage("total = 2048.00M"))
+
+    def test_boottime_parses_seconds(self):
+        self.assertEqual(parse_boottime("{ sec = 1791379437, usec = 417 } Wed Oct  7 21:23:57 2026"), 1791379437)
+        self.assertIsNone(parse_boottime(""))
+
+    def test_battery_reports_source_and_batteries(self):
+        laptop = parse_battery("Now drawing from 'Battery Power'\n"
+                               " -InternalBattery-0 (id=6619235)\t77%; discharging; 20:00 remaining present: true\n")
+        self.assertEqual(laptop["source"], "Battery Power")
+        self.assertEqual(laptop["batteries"], [{"percent": 77, "status": "discharging", "remaining_minutes": 1200}])
+        desktop = parse_battery("Now drawing from 'AC Power'\n")
+        self.assertEqual(desktop, {"source": "AC Power", "batteries": []})
+        self.assertIsNone(parse_battery(""))
+
+    def test_thermal_notes_mean_no_warning(self):
+        quiet = parse_thermal("Note: No thermal warning level has been recorded\n"
+                              "Note: No performance warning level has been recorded\n")
+        self.assertEqual(quiet, {"recorded": False, "details": []})
+        warned = parse_thermal("2026-10-19 01:00:00 +0800 CPU_Speed_Limit = 50\n")
+        self.assertTrue(warned["recorded"])
+        self.assertEqual(warned["details"], ["2026-10-19 01:00:00 +0800 CPU_Speed_Limit = 50"])
+
+    def test_gpu_statistics_parse(self):
+        text = ('"PerformanceStatistics" = {"In use system memory (driver)"=0,"Alloc system memory"=1671708672,'
+                '"Tiler Utilization %"=62,"recoveryCount"=0,"lastRecoveryTime"=0,"Renderer Utilization %"=62,'
+                '"TiledSceneBytes"=819200,"Device Utilization %"=62,"SplitSceneCount"=0,"In use system memory"=649166848}')
+        self.assertEqual(parse_gpu_statistics(text),
+                         {"device_utilization_percent": 62, "renderer_utilization_percent": 62,
+                          "tiler_utilization_percent": 62, "allocated_bytes": 1671708672,
+                          "in_use_bytes": 649166848})
+        self.assertIsNone(parse_gpu_statistics("+-o IOGPU \n    {\n"))
+
+    def test_netstat_interfaces_accept_address_column_variants(self):
+        text = (
+            "Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll\n"
+            "lo0        16384 <Link#1>                       7063727     0 13334958065  7063727     0 13334958065     0\n"
+            "lo0        16384 127           localhost       7063727     - 13334958065  7063727     - 13334958065     -\n"
+            "gif0*      1280  <Link#2>                             0     0          0        0     0          0\n"
+            "en0        1500 <Link#4>    a4:83:e7:12:34:56   123456     7      987654   654321     2      456789     0\n"
+        )
+        rows = {row["name"]: row for row in parse_netstat_interfaces(text)}
+        self.assertEqual(sorted(rows), ["en0", "gif0", "lo0"])
+        self.assertEqual(rows["lo0"], {"name": "lo0", "ipackets": 7063727, "ierrs": 0, "ibytes": 13334958065,
+                                       "opackets": 7063727, "oerrs": 0, "obytes": 13334958065})
+        self.assertEqual(rows["en0"]["ibytes"], 987654)
+        self.assertEqual(rows["en0"]["oerrs"], 2)
+        self.assertEqual(rows["gif0"]["ibytes"], 0)
+
+    def test_tcp_states_histogram_ignores_udp(self):
+        text = ("Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)\n"
+                "tcp4       0      0  192.168.1.9.51465     203.0.113.4.443        ESTABLISHED\n"
+                "tcp6       0      0  fe80::1.1234          ::.443                 ESTABLISHED\n"
+                "tcp4       0      0  *.5000                *.*                    LISTEN\n"
+                "tcp4       0      0  10.0.0.2.443          10.0.0.3.51234         CLOSE_WAIT\n"
+                "udp4       0      0  *.5353                *.*\n")
+        self.assertEqual(parse_tcp_states(text), {"ESTABLISHED": 2, "LISTEN": 1, "CLOSE_WAIT": 1})
+
+    def test_iostat_parses_last_sample(self):
+        text = ("              disk0       cpu    load average\n"
+                "    KB/t  tps  MB/s  us sy id   1m   5m   15m\n"
+                "   28.79   60  1.68   8  5 87  1.71 2.34 2.71\n"
+                "   12.22  159  1.90   7  5 88  1.57 2.30 2.70\n")
+        self.assertEqual(parse_iostat(text),
+                         {"cpu": {"user_percent": 7.0, "system_percent": 5.0, "idle_percent": 88.0},
+                          "disks": [{"name": "disk0", "kb_per_transfer": 12.22,
+                                     "transfers_per_second": 159.0, "mb_per_second": 1.90}],
+                          "load_average": [1.57, 2.30, 2.70]})
+        self.assertIsNone(parse_iostat(""))
+
+    def test_linux_proc_parsers(self):
+        dev = parse_proc_net_dev(
+            "Inter-|   Receive                                                |  Transmit\n"
+            " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n"
+            "  lo: 13334958065 7063727 0 0 0 0 0 0 13334958065 7063727 0 0 0 0 0 0\n"
+            "  en0: 987654 12345 7 0 0 0 0 0 456789 2345 2 0 0 0 0 0\n")
+        self.assertEqual(dev, [
+            {"name": "lo", "ibytes": 13334958065, "ipackets": 7063727, "ierrs": 0,
+             "obytes": 13334958065, "opackets": 7063727, "oerrs": 0},
+            {"name": "en0", "ibytes": 987654, "ipackets": 12345, "ierrs": 7,
+             "obytes": 456789, "opackets": 2345, "oerrs": 2}])
+        tcp = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+               "   0: 0100007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1\n"
+               "   1: 8364A8C0:E1D2 62D32A22:01BB 01 00000000:00000000 00:00000000 00000000   501        0 2 1\n")
+        self.assertEqual(parse_proc_tcp_states(tcp), {"LISTEN": 1, "ESTABLISHED": 1})
+        boot, cpu = parse_proc_stat("cpu  100 20 50 3000 10 0 0 0\nbtime 1791379437\ncpu0 50 10 25 1500 5 0 0 0\n")
+        self.assertEqual(boot, 1791379437)
+        self.assertEqual(cpu, {"user": 100, "nice": 20, "system": 50, "idle": 3000,
+                               "iowait": 10, "irq": 0, "softirq": 0, "steal": 0})
+
+    def test_macos_observe_collects_new_sections(self):
+        from observe import observe
+        success = {"ok": True, "reason": None, "text": ""}
+        responses = {
+            ("sysctl", "-n", "hw.memsize"): dict(success, text="8589934592\n"),
+            ("sysctl", "-n", "kern.boottime"): dict(success, text="{ sec = 1791379437, usec = 417 } Wed Oct  7 21:23:57 2026\n"),
+            ("sysctl", "-n", "vm.swapusage"): dict(success, text="total = 2048.00M  used = 692.44M  free = 1355.56M  (encrypted)\n"),
+            ("vm_stat",): dict(success, text=self.VM_STAT_TEXT),
+            ("netstat", "-ib"): dict(success, text="Name  Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll\n"
+                                                    "en0 1500 <Link#4> a4:83:e7:12:34:56 123456 7 987654 654321 2 456789 0\n"),
+            ("netstat", "-an"): dict(success, text="tcp4 0 0 *.5000 *.* LISTEN\ntcp4 0 0 10.0.0.2.443 10.0.0.3.5 CLOSE_WAIT\n"),
+            ("ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOGPU"): dict(
+                success, text='"PerformanceStatistics" = {"Device Utilization %"=62,"Renderer Utilization %"=62,'
+                              '"Tiler Utilization %"=62,"Alloc system memory"=1671708672,"In use system memory"=649166848}'),
+            ("pmset", "-g", "batt"): dict(success, text="Now drawing from 'Battery Power'\n"
+                                                        " -InternalBattery-0\t77%; discharging; 20:00 remaining present: true\n"),
+            ("pmset", "-g", "therm"): dict(success, text="Note: No thermal warning level has been recorded\n"),
+            ("iostat", "-c", "2"): dict(success, text="              disk0       cpu    load average\n"
+                                                      "    KB/t  tps  MB/s  us sy id   1m   5m   15m\n"
+                                                      "   28.79   60  1.68   8  5 87  1.71 2.34 2.71\n"
+                                                      "   12.22  159  1.90   7  5 88  1.57 2.30 2.70\n"),
+        }
+
+        def response(arguments, *args):
+            if tuple(arguments) in responses:
+                return responses[tuple(arguments)]
+            return responses.get((arguments[0],), success)
+
+        with patch("observe.platform.system", return_value="Darwin"), patch("observe.command", side_effect=response):
+            result = observe(self.policy)
+        self.assertEqual(result["boot"], {"available": True, "unix_time": 1791379437, "reason": None})
+        self.assertTrue(result["memory"]["available"])
+        self.assertEqual(result["memory"]["counters"]["Swapins"], 2590403)
+        self.assertTrue(result["memory"]["swap"]["available"])
+        self.assertEqual(result["memory"]["swap"]["used_bytes"], 726075965)
+        self.assertTrue(result["network"]["interfaces"]["available"])
+        self.assertEqual(result["network"]["interfaces"]["items"][0]["name"], "en0")
+        self.assertEqual(result["network"]["tcp_states"]["states"], {"LISTEN": 1, "CLOSE_WAIT": 1})
+        self.assertTrue(result["gpu"]["available"])
+        self.assertEqual(result["gpu"]["device_utilization_percent"], 62)
+        self.assertEqual(result["gpu"]["source_class"], "IOGPU")
+        self.assertTrue(result["power"]["available"])
+        self.assertEqual(result["power"]["source"], "Battery Power")
+        self.assertFalse(result["power"]["thermal"]["recorded"])
+        self.assertTrue(result["cpu"]["utilization"]["available"])
+        self.assertEqual(result["cpu"]["utilization"]["idle_percent"], 88.0)
+        self.assertTrue(result["diskio"]["available"])
+        self.assertEqual(result["diskio"]["disks"][0]["name"], "disk0")
+        facts = sample_facts(result)
+        self.assertEqual(facts["boot_time"], 1791379437)
+        self.assertEqual(facts["memory"]["swap"]["used_bytes"], 726075965)
+        self.assertEqual(facts["network"]["tcp_states"], {"LISTEN": 1, "CLOSE_WAIT": 1})
+        self.assertEqual(facts["power"]["source"], "Battery Power")
+        self.assertEqual(facts["gpu"]["allocated_bytes"], 1671708672)
+
+    def test_macos_observe_new_sections_fail_soft(self):
+        from observe import observe
+        success = {"ok": True, "reason": None, "text": ""}
+        responses = {"vm_stat": dict(success, text="Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"),
+                     "sysctl": dict(success, text="8589934592\n")}
+
+        def response(arguments, *args):
+            return responses.get(arguments[0], success)
+
+        with patch("observe.platform.system", return_value="Darwin"), patch("observe.command", side_effect=response):
+            result = observe(self.policy)
+        self.assertTrue(result["memory"]["available"])
+        self.assertFalse(result["memory"]["swap"]["available"])
+        for section in ["boot", "gpu", "power"]:
+            self.assertFalse(result[section]["available"], section)
+            self.assertTrue(result[section]["reason"])
+        self.assertFalse(result["network"]["interfaces"]["available"])
+        self.assertEqual(result["network"]["tcp_states"]["states"], {})
+        self.assertFalse(result["cpu"]["utilization"]["available"])
+        self.assertFalse(result["diskio"]["available"])
+        facts = sample_facts(result)
+        self.assertEqual(sorted(facts), ["cpu"])
+        self.assertIn("load_average", facts["cpu"])
+
+    def test_linux_observe_collects_counters_and_network(self):
+        from observe import observe
+        texts = {
+            "/proc/meminfo": "MemTotal: 8000000 kB\nMemAvailable: 2500000 kB\nCached: 1000000 kB\n"
+                             "AnonPages: 2000000 kB\nSwapTotal: 1048576 kB\nSwapFree: 524288 kB\n",
+            "/proc/stat": "cpu  100 20 50 3000 10 0 0 0\nbtime 1791379437\ncpu0 50 10 25 1500 5 0 0 0\n",
+            "/proc/net/dev": "Inter-|   Receive      |  Transmit\n"
+                             " face |bytes packets errs|bytes packets errs\n"
+                             "  en0: 987654 12345 7 0 0 456789 2345 2 0 0 0 0 0 0 0 0\n",
+            "/proc/net/tcp": "  sl  local_address rem_address   st\n   0: 0100007F:0035 00000000:0000 0A\n",
+        }
+
+        class FakePath(str):
+            def read_text(self):
+                return texts.get(str(self), texts["/proc/meminfo"])
+
+            def exists(self):
+                return str(self) in texts
+
+            def iterdir(self):
+                raise OSError("测试环境没有 /sys")
+
+        with patch("observe.platform.system", return_value="Linux"), \
+             patch("observe.Path", FakePath), \
+             patch("observe.command", return_value={"ok": True, "reason": None, "text": ""}):
+            result = observe(self.policy)
+        self.assertTrue(result["memory"]["available"])
+        self.assertEqual(result["memory"]["counters"]["AnonPages"], 2000000 * 1024)
+        self.assertTrue(result["memory"]["swap"]["available"])
+        self.assertEqual(result["memory"]["swap"]["used_bytes"], 524288 * 1024)
+        self.assertEqual(result["boot"], {"available": True, "unix_time": 1791379437, "reason": None})
+        self.assertEqual(result["cpu"]["counters"]["idle"], 3000)
+        self.assertIn("hz", result["cpu"])
+        self.assertTrue(result["network"]["interfaces"]["available"])
+        self.assertEqual(result["network"]["interfaces"]["items"][0]["name"], "en0")
+        self.assertEqual(result["network"]["tcp_states"]["states"], {"LISTEN": 1})
+        self.assertFalse(result["gpu"]["available"])
+        self.assertFalse(result["power"]["available"])
+        facts = sample_facts(result)
+        self.assertEqual(facts["boot_time"], 1791379437)
+        self.assertEqual(facts["cpu"]["counters"]["user"], 100)
+
+    def test_patrol_samples_carry_host_facts(self):
+        from steward import patrol
+        host = {"system": "test", "architecture": "test", "boot": {"available": True, "unix_time": 1791379437},
+                "cpu": {"cores": 8, "load_average": [1.0, 1.0, 1.0]},
+                "memory": {"available": True, "counters": {"Pages free": 100},
+                           "swap": {"available": True, "total_bytes": 8, "used_bytes": 3, "free_bytes": 5}},
+                "gpu": {"available": True, "device_utilization_percent": 5, "allocated_bytes": 10},
+                "model_usage": {}, "storage": [],
+                "processes": {"available": True, "items": []},
+                "services": {"available": True, "items": []},
+                "network": {"available": True,
+                            "interfaces": {"available": True, "items": [{"name": "en0", "ibytes": 5, "obytes": 3,
+                                                                        "ipackets": 1, "opackets": 1, "ierrs": 0, "oerrs": 0}]},
+                            "tcp_states": {"available": True, "states": {"ESTABLISHED": 2}}},
+                "power": {"available": True, "source": "Battery Power",
+                          "batteries": [{"percent": 77, "status": "discharging", "remaining_minutes": 1200}]}}
+        with patch("files.birth", return_value=1), patch("steward.observe", return_value=host), \
+             patch("steward.native_events", return_value={"available": True}):
+            report = patrol(self.store, self.policy)
+        from state_schema import read_current
+        sample = read_current(self.store)["samples"][-1]
+        self.assertEqual(sample["host"]["boot_time"], 1791379437)
+        self.assertEqual(sample["host"]["memory"]["counters"], {"Pages free": 100})
+        self.assertEqual(sample["host"]["memory"]["swap"]["used_bytes"], 3)
+        self.assertEqual(sample["host"]["network"]["interfaces"][0]["name"], "en0")
+        self.assertEqual(sample["host"]["power"]["source"], "Battery Power")
+        self.assertEqual(sample["host"]["gpu"]["allocated_bytes"], 10)
+        for key in ["boot", "network", "power"]:
+            self.assertIn(key, report["host"])
+
+    def test_patrol_tolerates_hosts_without_new_sections(self):
+        from steward import patrol
+        host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
+                "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
+                "services": {"available": True, "items": []}}
+        with patch("files.birth", return_value=1), patch("steward.observe", return_value=host), \
+             patch("steward.native_events", return_value={"available": True}):
+            report = patrol(self.store, self.policy)
+        from state_schema import read_current
+        sample = read_current(self.store)["samples"][-1]
+        self.assertIsNone(sample["host"])
+        self.assertNotIn("network", report["host"])
+        self.assertNotIn("power", report["host"])
+
+    def test_samples_host_field_schema(self):
+        from state_schema import read_current
+        base = {"version": 1, "samples": [{"time": 1, "processes": [], "host": {"boot_time": 2}}]}
+        self.store.write("current.json", base)
+        self.assertEqual(read_current(self.store)["samples"][0]["host"], {"boot_time": 2})
+        base["samples"] = [{"time": 1, "processes": []}]
+        self.store.write("current.json", base)
+        self.assertNotIn("host", read_current(self.store)["samples"][0])
+        base["samples"] = [{"time": 1, "processes": [], "host": ["invalid"]}]
+        self.store.write("current.json", base)
+        with self.assertRaises(StewardError):
+            read_current(self.store)
+
 
     def test_linux_event_reader_does_not_claim_persistent_history(self):
         from unittest.mock import patch
@@ -1127,10 +1429,10 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(current["pending"][0]["first_observed_at"], first)
         self.assertEqual(current["pending"][0]["reason"], "已找到来源，继续核对版本")
         update_pending(self.store, "task:review", "已核实，继续保留", resolve=True)
-        before = self.store.target("current.json").read_bytes()
+        before = dataset_snapshot(self.store, "current.json")
         with self.assertRaises(StewardError):
             update_pending(self.store, "task:review", "重复关闭", resolve=True)
-        self.assertEqual(self.store.target("current.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
         update_pending(self.store, "task:review", "来源已变更，需要重新核对")
         current = self.store.read("current.json")
         self.assertEqual(len(current["pending"]), 1)
@@ -1158,14 +1460,14 @@ class StewardTests(unittest.TestCase):
 
     def test_pending_validation_and_capacity_failure_preserve_state(self):
         update_pending(self.store, "existing", "继续跟踪")
-        before = self.store.target("current.json").read_bytes()
+        before = dataset_snapshot(self.store, "current.json")
         for key, reason in [("", "说明"), ("x" * 513, "说明"), ("new", " "), ("new", "x" * 513)]:
             with self.subTest(key=key[:10], reason=reason[:10]), self.assertRaises(StewardError):
                 update_pending(self.store, key, reason)
         small = Store(self.store.path, dict(self.policy["limits"], total_bytes=self.store.usage() + 1))
         with self.assertRaises(StewardError):
             update_pending(small, "new", "预算不足时保留旧状态")
-        self.assertEqual(self.store.target("current.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
 
     def test_cli_tracks_reads_and_resolves_agent_decisions_across_processes(self):
         policy_before = self.store.target("host.json").read_bytes()
@@ -1204,7 +1506,7 @@ class StewardTests(unittest.TestCase):
         self.store.write("current.json", {"version": 1,
                          "directory_index": [{"root": str(self.root), "path": str(alias)}],
                          "changes": [{"path": str(alias), "observed_at": time.time()}]})
-        before = self.store.target("current.json").read_bytes()
+        before = dataset_snapshot(self.store, "current.json")
         result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "status", "--state", str(self.store.path),
                                  "--path", str(self.root)], capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1212,7 +1514,7 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(report["directory_count"], 1)
         self.assertEqual(report["change_count"], 1)
         self.assertEqual(report["directory_index"][0]["path"], str(alias))
-        self.assertEqual(self.store.target("current.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
 
     def test_pending_history_is_bounded(self):
         rows = [{"key": f"old:{i}", "kind": "directory_growth"} for i in range(33)]

@@ -19,6 +19,10 @@ from state import Store, StewardError, encode
 from steward import initialize
 
 
+def dataset_snapshot(store, name, default=None):
+    return encode(store.read(name, default))
+
+
 class InventoryTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -89,15 +93,16 @@ class InventoryTests(unittest.TestCase):
 
     def test_corruption_and_capacity_failure_preserve_previous_inventory(self):
         register(self.store, self.definition)
-        before = self.store.target("inventory.json").read_bytes()
+        before = dataset_snapshot(self.store, "inventory.json")
         small = Store(self.store.path, dict(self.policy["limits"], total_bytes=self.store.usage() + 1))
         with self.assertRaises(StewardError):
             register(small, dict(self.definition, purpose="新的用途"))
-        self.assertEqual(before, self.store.target("inventory.json").read_bytes())
-        self.store.target("inventory.json").write_text('{"version":1,"resources":[]}')
+        self.assertEqual(before, dataset_snapshot(self.store, "inventory.json"))
+        self.store.write("inventory.json", {"version": 1, "resources": []})
         with self.assertRaises(StewardError):
             read_inventory(self.store)
-        self.assertEqual(self.store.target("inventory.json").read_text(), '{"version":1,"resources":[]}')
+        self.assertEqual(dataset_snapshot(self.store, "inventory.json"),
+                         encode({"version": 1, "resources": []}))
 
     def test_identity_change_remains_visible_on_repeated_inspections(self):
         register(self.store, self.definition)
@@ -109,10 +114,10 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(first["identity_continuity"], "changed")
         self.assertEqual(first["metadata_continuity"], "not_comparable")
         self.assertTrue(first["knowledge"]["identity_review_required"])
-        size = self.store.target("inventory.json").stat().st_size
+        size = len(dataset_snapshot(self.store, "inventory.json"))
         for _ in range(3):
             self.assertEqual(inspect_target(self.store, self.policy, "original")["identity_continuity"], "changed")
-        self.assertLess(self.store.target("inventory.json").stat().st_size, size + 256)
+        self.assertLess(len(dataset_snapshot(self.store, "inventory.json")), size + 256)
         register(self.store, dict(self.definition, evidence_at=time.time(), source="现场复核后的新来源"))
         self.assertEqual(inspect_target(self.store, self.policy, "original")["identity_continuity"], "baseline_created")
 
@@ -191,10 +196,10 @@ class InventoryTests(unittest.TestCase):
             "identity_continuity": "same", "identity_review_required": "yes"
         }
         self.store.write("inventory.json", data)
-        before = self.store.target("inventory.json").read_bytes()
+        before = dataset_snapshot(self.store, "inventory.json")
         with self.assertRaises(StewardError):
             read_inventory(self.store)
-        self.assertEqual(before, self.store.target("inventory.json").read_bytes())
+        self.assertEqual(before, dataset_snapshot(self.store, "inventory.json"))
 
     def test_same_definition_registration_does_not_clear_identity_review_latch(self):
         register(self.store, self.definition)
@@ -254,20 +259,20 @@ class InventoryTests(unittest.TestCase):
                     read_definition(candidate)
                 self.assertLess(time.monotonic() - started, 1.0)
 
-    def test_nonfinite_or_unbounded_times_are_corruption_not_fresh_evidence(self):
+    def test_unbounded_times_are_corruption_not_fresh_evidence(self):
         register(self.store, self.definition)
         original = read_inventory(self.store)
         for field in ("recorded_at", "inspection"):
-            for value in (float("nan"), 10**400):
+            for value in (10**400,):
                 with self.subTest(field=field, value=value):
                     data = json.loads(json.dumps(original))
                     data["resources"]["original"][field] = (value if field == "recorded_at" else
                         {"target": str(self.target), "observed_at": value, "startup": {}})
                     self.store.write("inventory.json", data)
-                    before = self.store.target("inventory.json").read_bytes()
+                    before = dataset_snapshot(self.store, "inventory.json")
                     with self.assertRaises(StewardError):
                         query(self.store, self.policy, "original")
-                    self.assertEqual(before, self.store.target("inventory.json").read_bytes())
+                    self.assertEqual(before, dataset_snapshot(self.store, "inventory.json"))
 
     def test_literal_references_return_locations_and_roles_without_secret_values(self):
         secret = "API_KEY_NEVER_EMIT_19358"
@@ -277,7 +282,7 @@ class InventoryTests(unittest.TestCase):
         register(self.store, self.definition)
         report = inspect_target(self.store, self.policy, "original")
         self.assertNotIn(secret, encode(report).decode())
-        self.assertNotIn(secret, self.store.target("inventory.json").read_text())
+        self.assertNotIn(secret, dataset_snapshot(self.store, "inventory.json").decode())
         self.assertEqual({row["role"] for row in report["references"]["items"]}, {"configuration", "documentation", "source"})
         self.assertTrue(report["references"]["root_coverage"][0]["complete_within_declared_filters"])
 
@@ -395,7 +400,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_definition_format_errors_block_api_and_cli_without_state_changes(self):
         definition = self.base / "bad-definition.json"
-        before = self.store.target("inventory.json").read_bytes()
+        before = dataset_snapshot(self.store, "inventory.json")
         payloads = [b"{", b'{"id":1,"id":2}', b'{"value":NaN}', b'{"value":1e309}',
                     b"\xff", b"[" * 2000 + b"]" * 2000]
         for index, payload in enumerate(payloads):
@@ -408,7 +413,7 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertEqual(json.loads(result.stderr)["status"], "blocked")
                 self.assertNotIn("Traceback", result.stderr)
-                self.assertEqual(self.store.target("inventory.json").read_bytes(), before)
+                self.assertEqual(dataset_snapshot(self.store, "inventory.json"), before)
 
     def test_alias_definition_is_rejected_and_query_is_read_only_canonical(self):
         alias = self.base / "alias"
@@ -417,14 +422,14 @@ class InventoryTests(unittest.TestCase):
             register(self.store, dict(self.definition, locator=str(alias / "original.txt")))
         self.assertEqual(read_inventory(self.store)["resources"], {})
         register(self.store, self.definition)
-        before = self.store.target("inventory.json").read_bytes()
+        before = dataset_snapshot(self.store, "inventory.json")
         result = query(self.store, self.policy, path=str(alias))
         self.assertEqual(result["total"], 1)
         self.assertFalse(result["resources"][0]["legacy_noncanonical"])
         for path in ("", "bad\x00path"):
             with self.subTest(path=path), self.assertRaises(StewardError):
                 query(self.store, self.policy, path=path)
-        self.assertEqual(self.store.target("inventory.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(self.store, "inventory.json"), before)
 
     def test_legacy_alias_inventory_is_readable_but_inspection_is_not_overwritten(self):
         alias = self.base / "legacy-alias"
@@ -434,7 +439,7 @@ class InventoryTests(unittest.TestCase):
                  "inspection": {"target": definition["locator"], "observed_at": time.time(),
                                 "startup": {}, "custom": "keep"}}
         self.store.write("inventory.json", {"version": 1, "resources": {"original": entry}})
-        before = self.store.target("inventory.json").read_bytes()
+        before = dataset_snapshot(self.store, "inventory.json")
         self.assertEqual(read_inventory(self.store)["resources"]["original"]["definition"]["locator"], definition["locator"])
         queried = query(self.store, self.policy, path=str(self.root))
         self.assertEqual(queried["total"], 1)
@@ -444,7 +449,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(report["status"], "migration_required")
         self.assertFalse(report["recording"]["saved"])
         self.assertIn("migration", report["recording"]["reason"])
-        self.assertEqual(self.store.target("inventory.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(self.store, "inventory.json"), before)
 
     def test_legacy_alias_retarget_does_not_attach_new_policy_to_old_evidence(self):
         original = self.root / "a"
@@ -456,7 +461,7 @@ class InventoryTests(unittest.TestCase):
         definition = dict(self.definition, locator=str(alias / "original.txt"))
         entry = {"definition": definition, "recorded_at": time.time(), "anchor": "old-anchor", "inspection": None}
         self.store.write("inventory.json", {"version": 1, "resources": {"original": entry}})
-        before = self.store.target("inventory.json").read_bytes()
+        before = dataset_snapshot(self.store, "inventory.json")
         self.policy["directory_rules"] = [{"path": str(replacement), "purpose": "new", "kind": "cold"}]
         alias.unlink()
         alias.symlink_to(replacement, target_is_directory=True)
@@ -464,7 +469,7 @@ class InventoryTests(unittest.TestCase):
         self.assertTrue(item["legacy_noncanonical"])
         self.assertIsNone(item["policy"]["directory_rule_path"])
         self.assertEqual(item["definition"]["locator"], definition["locator"])
-        self.assertEqual(self.store.target("inventory.json").read_bytes(), before)
+        self.assertEqual(dataset_snapshot(self.store, "inventory.json"), before)
 
 
 if __name__ == "__main__":

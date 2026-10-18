@@ -12,7 +12,7 @@ python3 /skill目录/tools/steward.py inspect --state /本机状态 --id 资源�
 
 按 skill 目录中的 `state/resource.example.json` 填写资源定义，再用 `inventory --state /本机状态 --record /资源定义.json` 登记。每份定义最多 8 KiB，档案最多 128 项，容量不足时保留原档案并拒绝写入。
 
-`inventory.json` 按 id 保存当前定义和一份最新调查。相同 id 的新定义替换旧定义，同时清空调查与身份基准；完全相同的定义返回 `unchanged`。登记后的第一次成功调查建立新基准。旧状态缺少此文件时按空档案查询，首次登记时创建。
+数据库的 inventory 数据集按 id 保存当前定义和一份最新调查。相同 id 的新定义替换旧定义，同时清空调查与身份基准；完全相同的定义返回 `unchanged`。登记后的第一次成功调查建立新基准。新数据库尚无档案时按空档案查询，首次登记时写入；旧 JSON 状态需先按[接管指导](setup.md#旧状态迁移与导出)迁移。
 
 ## 知识字段与来源时间
 
@@ -52,4 +52,4 @@ python3 /skill目录/tools/steward.py inspect --state /本机状态 --service sy
 
 ## 调查预算
 
-整次调查共用 `host.json.limits` 的时间和条目预算，并有以下固定上限：读取最多 100 个文件，每个最多 min(command_bytes, 256 KiB)；文件读取与子进程输出累计最多 min(file_bytes, 2 MiB)；展示最多 20 个引用，截断数量可见。已登记资源的调查摘要最多 32 KiB，同时受状态单文件与总容量限制。这些是工具硬上限，配置预算可以更小。
+整次调查共用 `host.json.limits` 的时间和条目预算，并有以下固定上限：读取最多 100 个文件，每个最多 min(command_bytes, 256 KiB)；文件读取与子进程输出累计最多 min(file_bytes, 2 MiB)；展示最多 20 个引用，截断数量可见。已登记资源的调查摘要最多 32 KiB，同时受单条记录与状态总容量限制。这些是工具硬上限，配置预算可以更小。

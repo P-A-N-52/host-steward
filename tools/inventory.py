@@ -1,4 +1,4 @@
-"""Durable resource knowledge; permissions remain in host.json."""
+"""长期资源知识；权限仍以 host.json 为准。"""
 
 import os
 from pathlib import Path
@@ -69,13 +69,13 @@ def read_definition(path):
 def read_inventory(store):
     data = store.read("inventory.json", {"version": 1, "resources": {}})
     if not isinstance(data, dict) or set(data) != {"version", "resources"} or type(data["version"]) is not int or data["version"] != 1:
-        raise StewardError("本机档案格式错误，保留原文件")
+        raise StewardError("本机档案格式错误，保留原状态")
     resources = data["resources"]
     if not isinstance(resources, dict) or len(resources) > 128:
         raise StewardError("资源档案格式或数量无效，最多 128 项")
     for key, entry in resources.items():
         if not isinstance(entry, dict) or set(entry) != {"definition", "recorded_at", "anchor", "inspection"}:
-            raise StewardError("资源条目损坏，保留原文件")
+            raise StewardError("资源条目损坏，保留原状态")
         definition = validate_record(entry["definition"], require_canonical=False)
         if definition["id"] != key or not timestamp_seconds(entry["recorded_at"]):
             raise StewardError("资源条目的身份或时间无效")
@@ -86,10 +86,10 @@ def read_inventory(store):
             if (not isinstance(report, dict) or report.get("target") != definition["locator"]
                     or not timestamp_seconds(report.get("observed_at"))
                     or not isinstance(report.get("startup", {}), dict)):
-                raise StewardError("资源调查记录无效，保留原文件")
+                raise StewardError("资源调查记录无效，保留原状态")
             if ("identity_review_required" in report
                     and type(report["identity_review_required"]) is not bool):
-                raise StewardError("资源调查复核标志无效，保留原文件")
+                raise StewardError("资源调查复核标志无效，保留原状态")
     return data
 
 
