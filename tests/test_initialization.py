@@ -81,6 +81,32 @@ class InitializationTests(unittest.TestCase):
                 if lock_bytes is not None:
                     self.assertEqual((directory / ".lock").read_bytes(), lock_bytes)
 
+    def test_template_limits_keys_match_contract(self):
+        template = decode(steward.read_regular_bytes(PROJECT / "state/host.example.json", 32768))
+        self.assertEqual(set(template["limits"]), steward.LIMIT_FIELDS,
+                         "模板 limits 键集与工具契约不一致，init 会拒绝自己生成的约定")
+
+    def test_fresh_state_supports_immediate_status_and_inventory(self):
+        directory = self.base / "first-run"
+        initialize(directory, [self.root], "首跑衔接")
+        environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        outputs = {}
+        for action in ["status", "inventory"]:
+            with self.subTest(action=action):
+                result = subprocess.run([str(PROJECT / "steward"), action, "--state", str(directory)],
+                                        cwd="/", capture_output=True, text=True, timeout=5, env=environment)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                outputs[action] = json.loads(result.stdout)
+        self.assertEqual(outputs["status"]["pending_count"], 0)
+        self.assertEqual(outputs["status"]["pending_overflow_count"], 0)
+        self.assertEqual(outputs["status"]["directory_count"], 0)
+        self.assertEqual(outputs["status"]["change_count"], 0)
+        self.assertEqual(outputs["status"]["recent_changes"], [])
+        self.assertEqual(outputs["status"]["operations"], [])
+        self.assertEqual(outputs["inventory"]["status"], "not_registered")
+        self.assertEqual(outputs["inventory"]["total"], 0)
+
     def test_missing_host_preserves_existing_state_byte_for_byte(self):
         directory = self.base / "existing"
         directory.mkdir()

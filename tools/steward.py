@@ -21,14 +21,25 @@ from state_schema import read_current, read_operations
 
 PROJECT = Path(__file__).resolve().parent.parent
 
+# 预算键集契约：模板 state/host.example.json 只提供 init 默认值，运行期校验以此常量为准
+LIMIT_FIELDS = frozenset([
+    "scan_entries", "scan_seconds", "scan_depth", "processes", "command_bytes",
+    "file_bytes", "total_bytes", "output_bytes", "change_records", "sample_records",
+    "operation_records", "retention_hours"])
+
 
 def validate(policy):
     if not isinstance(policy, dict) or type(policy.get("version")) is not int or policy["version"] != 1 or not isinstance(policy.get("purpose"), str):
         raise StewardError("本机约定版本或用途无效")
     limits = policy.get("limits", {})
-    expected = decode(read_regular_bytes(PROJECT / "state/host.example.json", 32768))["limits"]
-    if not isinstance(limits, dict) or set(limits) != set(expected) or any(type(value) is not int or value <= 0 for value in limits.values()):
+    if not isinstance(limits, dict) or any(type(value) is not int or value <= 0 for value in limits.values()):
         raise StewardError("预算字段必须完整，且为正整数")
+    missing = sorted(LIMIT_FIELDS - set(limits))
+    unknown = sorted(str(key) for key in set(limits) - LIMIT_FIELDS)
+    if missing or unknown:
+        detail = "；".join(part for part in (f"缺失 {'、'.join(missing)}" if missing else "",
+                                             f"未知 {'、'.join(unknown)}" if unknown else "") if part)
+        raise StewardError(f"预算字段必须完整，且为正整数；{detail}")
     if limits["scan_entries"] > 10000 or limits["scan_seconds"] > 30 or limits["scan_depth"] > 64:
         raise StewardError("demo 扫描上限为 10000 项、30 秒、64 层")
     if limits["file_bytes"] > 8 * 1024**2 or limits["total_bytes"] > 64 * 1024**2:

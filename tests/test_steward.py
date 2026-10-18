@@ -1238,6 +1238,46 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(current["pending_history_dropped"], 1)
         self.assertFalse(current["pending"])
 
+    def test_retention_window_filters_stale_and_record_cap_counts_dropped(self):
+        from unittest.mock import patch
+        from steward import patrol
+        host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
+                "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
+                "services": {"available": True, "items": []}}
+        parents = ["old-a", "keep-b", "keep-c", "new-d", "new-e"]
+        for name in parents:
+            (self.root / name).mkdir()
+        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": False}):
+            patrol(self.store, self.policy)
+            for name in parents[:3]:
+                (self.root / name / "seed").write_text("x")
+            patrol(self.store, self.policy)
+            current = self.store.read("current.json")
+            self.assertEqual({row["path"] for row in current["changes"]},
+                             {str(self.root), *[str(self.root / name) for name in parents[:3]]})
+            now = time.time()
+            by_path = {row["path"]: row for row in current["changes"]}
+            by_path[str(self.root / "old-a")]["observed_at"] = now - 49 * 3600
+            by_path[str(self.root / "keep-b")]["observed_at"] = now - 3600
+            by_path[str(self.root / "keep-c")]["observed_at"] = now - 2 * 3600
+            self.store.write("current.json", current)
+            (self.root / "new-d" / "seed").write_text("x")
+            patrol(self.store, self.policy)
+            current = self.store.read("current.json")
+            paths = {row["path"] for row in current["changes"]}
+            self.assertNotIn(str(self.root / "old-a"), paths)
+            self.assertTrue({str(self.root / name) for name in ["keep-b", "keep-c", "new-d"]} <= paths)
+            self.assertEqual(current["change_records_dropped"], 0)
+            self.policy["limits"]["change_records"] = 2
+            self.store.write("host.json", self.policy)
+            (self.root / "new-e" / "seed").write_text("x")
+            patrol(self.store, self.policy)
+            current = self.store.read("current.json")
+            self.assertEqual({row["path"] for row in current["changes"]},
+                             {str(self.root), str(self.root / "new-e")})
+            self.assertEqual(len(current["changes"]), 2)
+            self.assertEqual(current["change_records_dropped"], 5)
+
     def test_partial_patrol_preserves_last_directory_index(self):
         from unittest.mock import patch
         from steward import patrol
