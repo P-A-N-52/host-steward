@@ -2,6 +2,12 @@
 
 本文件供开发 agent 维护 Host Steward 仓库时使用。运行时入口是 [SKILL.md](SKILL.md)，项目目标见 [charter.md](charter.md)，设计取舍见 [design.md](design.md)。
 
+## 设计原则
+
+本项目的目的是在用户约定的范围内放手让 agent 长期整理与维护主机。LLM 负责理解用途和上下文、发现工作、补充调查、选择整理方式并判断结果；开发时应为它提供充分的事实、长期知识和可靠工具。文件分类、冷热状态、归档方式及可恢复性与恢复成本等判断，优先由 agent 结合具体情况完成。
+
+固定规则用于明确授权、保护、预算和执行可靠性，工具落实路径、对象身份、容量与状态写入等可核验约束。新增配置、类型白名单或分支前，先判断该问题是否适合交给 agent；只有明确的用户约定、通用约束或经验证的工具需求才固化为规则。已有授权内的常规决定由 agent 自主完成，证据不足时按需调查，新增权限或需要用户取舍时再请求确认。
+
 ## 开发方式
 
 每次修改前先进入规划阶段，说明要解决的问题、涉及的文件和验证方法，再开始编辑。根据问题选择完整、清楚的改法，让组件各有职责、逻辑自然衔接。文档、指导、代码注释和报错信息使用中文。
@@ -12,8 +18,8 @@
 
 ```sh
 python3 -m unittest discover -s tests -v   # 统一测试入口
-./steward --help                         # CLI 命令列表
-./steward demo --workspace /tmp/新空目录  # 演示回归
+python3 tools/steward.py --help                         # CLI 命令列表
+python3 tools/steward.py demo --workspace /tmp/新空目录  # 演示回归
 ```
 
 演示保留已有 workspace，并返回 `existing_demo, verified=false`；重新验证须换用新空目录。`.demo/` 与 `.local-state/` 是已忽略的运行产物。
@@ -22,7 +28,7 @@ python3 -m unittest discover -s tests -v   # 统一测试入口
 
 | 模块 | 职责 |
 | --- | --- |
-| `steward` → `tools/steward.py` | shell 入口与 CLI 组装 |
+| `tools/steward.py` | 本地 agent 调用的 Python 命令入口 |
 | `files.py`、`events.py` | 扫描、对象身份、变化聚合与原生事件 |
 | `observe.py` | 有预算的子进程观测 |
 | `state.py`、`state_schema.py` | 状态读写、容量控制与结构校验 |

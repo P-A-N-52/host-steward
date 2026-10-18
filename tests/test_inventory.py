@@ -60,10 +60,21 @@ class InventoryTests(unittest.TestCase):
 
     def test_invalid_definitions_do_not_create_inventory(self):
         for field, value in [("kind", []), ("evidence_at", float("nan")), ("review_after_hours", True),
+                             ("kind", " "), ("kind", "x" * 65),
                              ("source", "x" * 1025), ("locator", "relative/path")]:
             with self.subTest(field=field), self.assertRaises(StewardError):
                 register(self.store, dict(self.definition, **{field: value}))
         self.assertEqual(read_inventory(self.store)["resources"], {})
+
+    def test_agent_defined_kind_uses_path_inspection_without_changing_authorization(self):
+        before = self.store.target("host.json").read_bytes()
+        register(self.store, dict(self.definition, kind="课程原始资料"))
+        report = inspect_target(self.store, self.policy, "original")
+        saved = query(self.store, self.policy, "original")["resources"][0]
+        self.assertEqual(saved["definition"]["kind"], "课程原始资料")
+        self.assertEqual(report["object"]["path"], str(self.target))
+        self.assertTrue(report["recording"]["saved"])
+        self.assertEqual(self.store.target("host.json").read_bytes(), before)
 
     def test_inspection_stores_policy_references_without_an_authorization_copy(self):
         self.policy["directory_rules"] = [{"path": str(self.root), "purpose": "重要资料", "kind": "cold", "allow_notes": True}]
@@ -366,17 +377,16 @@ class InventoryTests(unittest.TestCase):
         self.assertNotIn("secret-value", encode(report).decode())
         self.assertEqual(len(report["configurations"]), 1)
 
-    def test_cli_reads_persisted_definition_in_a_separate_shell_and_cwd(self):
+    def test_cli_reads_persisted_definition_in_a_separate_process_and_cwd(self):
         definition = self.base / "definition.json"
         definition.write_text(json.dumps(self.definition))
-        prefix = [str(PROJECT / "steward")]
+        prefix = [sys.executable, str(PROJECT / "tools/steward.py")]
         before = hashlib.sha256(self.store.target("host.json").read_bytes()).hexdigest()
-        writer = subprocess.run(["/bin/bash", *prefix, "inventory", "--state", str(self.store.path), "--record", str(definition)],
+        writer = subprocess.run([*prefix, "inventory", "--state", str(self.store.path), "--record", str(definition)],
                                 cwd="/", capture_output=True, text=True, timeout=5)
         self.assertEqual(writer.returncode, 0, writer.stderr)
-        shell = "/bin/zsh" if Path("/bin/zsh").exists() else "/bin/bash"
-        reader = subprocess.run([shell, *prefix, "inventory", "--state", str(self.store.path), "--id", "original"],
-                                cwd="/", capture_output=True, text=True, timeout=5)
+        reader = subprocess.run([*prefix, "inventory", "--state", str(self.store.path), "--id", "original"],
+                                cwd=str(self.base), capture_output=True, text=True, timeout=5)
         self.assertEqual(reader.returncode, 0, reader.stderr)
         data = json.loads(reader.stdout)["resources"][0]
         self.assertEqual(data["definition"]["purpose"], "原始资料")
@@ -393,7 +403,7 @@ class InventoryTests(unittest.TestCase):
                 definition.write_bytes(payload)
                 with self.assertRaises(StewardError):
                     read_definition(definition)
-                result = subprocess.run([str(PROJECT / "steward"), "inventory", "--state", str(self.store.path),
+                result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "inventory", "--state", str(self.store.path),
                                          "--record", str(definition)], cwd="/", capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertEqual(json.loads(result.stderr)["status"], "blocked")

@@ -35,12 +35,23 @@ class PolicyScopeTests(unittest.TestCase):
             return patrol(self.store, self.policy)
 
     def cli(self, action, *arguments):
-        return subprocess.run([str(PROJECT / "steward"), action, "--state", str(self.store.path), *map(str, arguments)],
+        return subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), action, "--state", str(self.store.path), *map(str, arguments)],
                               cwd="/", capture_output=True, text=True, timeout=5)
 
     def rule(self, path, kind="temporary"):
         return {"path": str(path), "purpose": "隔离规则", "kind": kind, "allow_quarantine": True,
                 "retention_days": 0, "recycle_bytes": 1048576, "directory_id": identity(path.stat())}
+
+    def test_agent_defined_directory_kind_does_not_authorize_quarantine(self):
+        target = self.root / "original.txt"
+        target.write_text("需要保留的原始资料")
+        self.policy["directory_rules"] = [self.rule(self.root, "课程资料")]
+        validate(self.policy)
+        self.store.write("host.json", self.policy)
+        result = self.cli("quarantine", "--path", target, "--apply")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(target.read_text(), "需要保留的原始资料")
+        self.assertFalse((self.root / ".recycle").exists())
 
     def test_duplicate_rules_block_before_maintenance_in_both_orders(self):
         allow = self.rule(self.root)
@@ -135,7 +146,7 @@ class PolicyScopeTests(unittest.TestCase):
         self.assertTrue(target.is_file())
         self.assertFalse(any(row["kind"] == "directory_growth" for row in report["pending"]))
         self.assertEqual(self.run_patrol()["gaps"], [])
-        self.assertFalse(self.run_patrol()["actionable"])
+        self.assertFalse(self.run_patrol()["observations_changed"])
 
     def test_legacy_scope_is_upgraded_only_after_complete_snapshot(self):
         directory = self.root / "nested"

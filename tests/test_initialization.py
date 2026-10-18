@@ -93,13 +93,12 @@ class InitializationTests(unittest.TestCase):
         outputs = {}
         for action in ["status", "inventory"]:
             with self.subTest(action=action):
-                result = subprocess.run([str(PROJECT / "steward"), action, "--state", str(directory)],
+                result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), action, "--state", str(directory)],
                                         cwd="/", capture_output=True, text=True, timeout=5, env=environment)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stderr, "")
                 outputs[action] = json.loads(result.stdout)
         self.assertEqual(outputs["status"]["pending_count"], 0)
-        self.assertEqual(outputs["status"]["pending_overflow_count"], 0)
         self.assertEqual(outputs["status"]["directory_count"], 0)
         self.assertEqual(outputs["status"]["change_count"], 0)
         self.assertEqual(outputs["status"]["recent_changes"], [])
@@ -143,14 +142,14 @@ class InitializationTests(unittest.TestCase):
         store.target("host.json").unlink()
         before = self._snapshot(directory)
         environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-        missing = subprocess.run([str(PROJECT / "steward"), "status", "--state", str(directory)],
+        missing = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "status", "--state", str(directory)],
                                  cwd="/", capture_output=True, text=True, timeout=5, env=environment)
         self.assertEqual(missing.returncode, 2, missing.stderr)
         reason = json.loads(missing.stderr)["reason"]
         self.assertIn("恢复", reason)
         self.assertNotIn("请先 init", reason)
         result = subprocess.run(
-            [str(PROJECT / "steward"), "init", "--state", str(directory),
+            [sys.executable, str(PROJECT / "tools/steward.py"), "init", "--state", str(directory),
              "--root", str(self.root), "--purpose", "不应覆盖"],
             cwd=str(PROJECT), capture_output=True, text=True, timeout=5, env=environment)
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -162,8 +161,9 @@ class InitializationTests(unittest.TestCase):
         self.assertEqual(self._snapshot(directory), before)
 
     def test_payload_prechecks_reject_single_file_and_total_capacity(self):
+        file_bytes = max(8192, max(len(payload) for payload in self._guidance().values()))
         cases = [
-            ("single", {"file_bytes": 8192}, "x" * 9000, "单文件预算"),
+            ("single", {"file_bytes": file_bytes}, "x" * (file_bytes + 1), "单文件预算"),
             ("total", {"total_bytes": 1}, "容量预检", "状态总容量不足"),
         ]
         for label, limits, purpose, message in cases:

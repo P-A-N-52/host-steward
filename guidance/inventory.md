@@ -2,12 +2,12 @@
 
 ## 查读与登记
 
-调查对象前先读已有用途、依赖和保留理由，再补充当前证据。宿主提供 skill 目录与本机状态路径：
+调查对象前先读已有用途、依赖和保留理由，再补充当前证据。命令使用本地 agent 已记录的 skill 目录与本机状态路径：
 
 ```sh
-/skill目录/steward inventory --state /本机状态 --id 资源编号
-/skill目录/steward inventory --state /本机状态 --path /相关目录 --limit 10
-/skill目录/steward inspect --state /本机状态 --id 资源编号
+python3 /skill目录/tools/steward.py inventory --state /本机状态 --id 资源编号
+python3 /skill目录/tools/steward.py inventory --state /本机状态 --path /相关目录 --limit 10
+python3 /skill目录/tools/steward.py inspect --state /本机状态 --id 资源编号
 ```
 
 按 skill 目录中的 `state/resource.example.json` 填写资源定义，再用 `inventory --state /本机状态 --record /资源定义.json` 登记。每份定义最多 8 KiB，档案最多 128 项，容量不足时保留原档案并拒绝写入。
@@ -16,7 +16,7 @@
 
 ## 知识字段与来源时间
 
-定义包含稳定 id、类别、位置、用途、归属、依赖、保留理由、维护方法和来源。路径资源使用无符号链接的规范绝对路径，服务位置使用带管理器和范围的名称。
+定义包含稳定 id、类别、位置、用途、归属、依赖、保留理由、维护方法和来源。类别由 agent 命名，为最多 64 字节的非空短文本；`service` 专用于服务调查，其余类别使用无符号链接的规范绝对路径。保留理由和维护方法可以记录恢复、重新下载或重建的依据与成本，供后续判断，不必逐类增加固定字段。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -39,9 +39,9 @@
 ## 针对性调查
 
 ```sh
-/skill目录/steward inspect --state /本机状态 --path /明确目标
-/skill目录/steward inspect --state /本机状态 --service launchd:user/com.example.job
-/skill目录/steward inspect --state /本机状态 --service systemd:user/example.service
+python3 /skill目录/tools/steward.py inspect --state /本机状态 --path /明确目标
+python3 /skill目录/tools/steward.py inspect --state /本机状态 --service launchd:user/com.example.job
+python3 /skill目录/tools/steward.py inspect --state /本机状态 --service systemd:user/example.service
 ```
 
 `inspect --id` 将最新调查保存到已登记条目。直接按 path 或 service 调查只返回输出（`recording.saved=false`），需要保留时先登记资源，再按 id 调查。文件目标限于 `host.json.roots` 内的规范路径；服务调查的管理器、进程、端点与功能验证范围见 [services](situations/services.md)。

@@ -43,7 +43,7 @@ Steward 维护从 `operations.json` 找到操作编号，核对记录中的身�
 ### 恢复文件
 
 ```sh
-./steward restore --state /本机状态 --operation 操作编号
+python3 /skill目录/tools/steward.py restore --state /本机状态 --operation 操作编号
 ```
 
 恢复默认预览。本机约定仍允许、目录身份和路径相符、原位置为空时，才可加 `--apply`。恢复路径要求无符号链接的规范绝对路径；旧证据可以读回，非规范路径需先明确迁移方案。原位置已有新对象时保留该对象，停止恢复。

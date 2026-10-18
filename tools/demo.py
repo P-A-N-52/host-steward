@@ -72,7 +72,7 @@ def run_demo(workspace):
         {"path": str(root / "working"), "purpose": "演示任务临时产物", "kind": "temporary", "allow_notes": True,
          "allow_quarantine": True, "retention_days": 1, "recycle_bytes": 1048576,
          "directory_id": identity((root / "working").stat())},
-        {"path": str(root / "logs"), "purpose": "演示程序日志", "kind": "service", "growth_warning_bytes": 262144,
+        {"path": str(root / "logs"), "purpose": "演示程序日志", "kind": "service",
          "directory_id": identity((root / "logs").stat())}]
     with store.lock():
         store.write("host.json", policy)
@@ -111,8 +111,7 @@ def run_demo(workspace):
                          "basis": "reported", "source": "样例用户说明，未独立确认实际业务用途",
                          "evidence_at": old, "review_after_hours": 720})
         investigation = inspect_target(store, policy, "demo.cold")
-    shell = "/bin/zsh" if Path("/bin/zsh").exists() else "/bin/bash"
-    reader = subprocess.run([shell, str(Path(__file__).resolve().parents[1] / "steward"), "inventory", "--state", str(store.path),
+    reader = subprocess.run([sys.executable, str(Path(__file__).resolve().with_name("steward.py")), "inventory", "--state", str(store.path),
                              "--id", "demo.cold"], cwd="/", capture_output=True, timeout=5, check=True)
     readback = decode(reader.stdout)["resources"][0]
     current = read_current(store)
@@ -145,9 +144,7 @@ def run_demo(workspace):
                                      and first["new_baselines"] == [str(root)] and not first["gaps"],
         "change_snapshot_complete": second["last_run"]["coverage_complete"] and not second["new_baselines"],
         "directory_changes_observed": reliable_changes or uncertain_changes,
-        "log_growth_detected": log_change.get("modified") == 1 and log_change.get("byte_delta") == 1024**2
-                               and any(row["kind"] == "directory_growth" and row.get("path") == str(root / "logs")
-                                       for row in second["pending"]),
+        "log_growth_detected": log_change.get("modified") == 1 and log_change.get("byte_delta") == 1024**2,
         "cold_file_protected": cold_rejected and cold.read_text().startswith("重要原始资料"),
         "user_agents_preserved": note["applied"] and (root / "cold/AGENTS.md").read_text().startswith("# 用户原有说明"),
         "quarantine_verified": move_verified,

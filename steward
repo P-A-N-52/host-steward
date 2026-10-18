@@ -1,4 +1,0 @@
-#!/usr/bin/env sh
-set -eu
-steward_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-exec python3 "$steward_dir/tools/steward.py" "$@"

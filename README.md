@@ -10,7 +10,7 @@
 https://github.com/P-A-N-52/host-steward
 
 请使用 Host Steward 帮我长期管理这台电脑上的文件和相关运行环境。
-先读取 SKILL.md，和我确认管理范围，从只读盘点开始。
+先读取 SKILL.md，按入口说明准备运行内容，和我确认管理范围，从只读盘点开始。
 ```
 
 目前支持 macOS 和 Linux，需要 Python 3.9+，只使用标准库。
@@ -33,15 +33,14 @@ https://github.com/P-A-N-52/host-steward
 
 ## 项目结构
 
+AI 实际使用的目录：
+
 ```text
 host-steward/
-├── SKILL.md     助手入口
-├── guidance/    接管、巡检与专项指导
-├── tools/       观测与维护工具
-├── state/       本机约定与资源定义模板
-├── steward      命令行入口
-├── charter.md   项目目标
-└── design.md    设计细节与当前实现范围
+├── SKILL.md    助手入口
+├── guidance/   接管、巡检与专项指导
+├── tools/      由本地 agent 调用的 Python 工具
+└── state/      本机约定与资源定义模板
 ```
 
 项目目标见 [charter.md](charter.md)，设计细节与当前实现范围见 [design.md](design.md)。

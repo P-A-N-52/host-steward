@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host Steward demo CLI for macOS/Linux, invoked from bash or zsh."""
+"""供本地 agent 直接调用的 macOS/Linux 单轮工具入口。"""
 
 import argparse
 import json
@@ -79,14 +79,13 @@ def validate(policy):
         rule_paths.add(rule["path"])
         if any(key in rule and type(rule[key]) is not bool for key in ["allow_notes", "allow_quarantine"]):
             raise StewardError("维护授权字段必须为布尔值")
-        if rule.get("kind") not in ["cold", "temporary", "active", "service"] or not isinstance(rule.get("purpose"), str):
+        kind = rule.get("kind")
+        if not isinstance(kind, str) or not kind.strip() or len(kind.encode()) > 64 or not isinstance(rule.get("purpose"), str):
             raise StewardError("目录约定需包含明确类别与用途")
         if "retention_days" in rule and (type(rule["retention_days"]) is not int or rule["retention_days"] < 0):
             raise StewardError("保留天数无效")
         if rule.get("allow_quarantine") and (type(rule.get("recycle_bytes")) is not int or rule["recycle_bytes"] <= 0):
             raise StewardError("允许回收的目录必须设置正整数 recycle_bytes")
-        if "growth_warning_bytes" in rule and (type(rule["growth_warning_bytes"]) is not int or rule["growth_warning_bytes"] <= 0):
-            raise StewardError("目录增长调查阈值必须为正整数字节数")
     return policy
 
 
@@ -299,60 +298,40 @@ def native_events(policy, previous):
     return result
 
 
-def memory_findings(samples):
-    if len(samples) < 4 or samples[-1]["time"] - samples[0]["time"] < 600:
-        return []
-    series = {}
-    for sample in samples[-8:]:
-        for process in sample["processes"]:
-            series.setdefault(process["identity"], []).append(process["rss_bytes"])
-    findings = []
-    for key, values in series.items():
-        if len(values) >= 4 and all(a < b for a, b in zip(values, values[1:])) and values[-1] - values[0] > max(64 * 1024**2, values[0] // 2):
-            findings.append({"key": "memory:" + key, "kind": "suspected_memory_growth", "identity": key,
-                             "growth_bytes": values[-1] - values[0],
-                             "reason": "连续采样增长线索；需结合任务与内存口径调查，尚未确认泄漏"})
-    return findings
-
-
-PENDING_LIMIT = 64
-PENDING_OVERFLOW_LIMIT = 64
 PENDING_HISTORY_LIMIT = 32
 
 
-def promote_overflow(pending, overflow):
-    promoted = []
-    while len(pending) < PENDING_LIMIT and overflow:
-        key = min(overflow, key=lambda item: (overflow[item].get("first_observed_at", overflow[item].get("observed_at", 0)), item))
-        pending[key] = overflow.pop(key)
-        promoted.append(key)
-    return promoted
+def pending_items(current):
+    # 旧溢出队列并入同一列表，保留事项内容；后续写入只保存 pending。
+    return {row["key"]: row for field in ["pending", "pending_overflow"] for row in current.get(field, [])}
 
 
-def resolve_pending(store, key, reason):
+def update_pending(store, key, reason, resolve=False):
     if not isinstance(key, str) or not key or len(key.encode()) > 512:
         raise StewardError("待核验事项 key 无效或超过 512 字节")
     if not isinstance(reason, str) or not reason.strip() or len(reason.encode()) > 512:
-        raise StewardError("解决理由需为 1–512 字节的非空文本")
+        raise StewardError("事项说明需为 1–512 字节的非空文本")
     current = read_current(store)
-    if not isinstance(current, dict) or current.get("version") != 1:
-        raise StewardError("巡检状态格式或版本不符，保留原文件")
-    pending = {row["key"]: row for row in current.get("pending", [])}
-    overflow = {row["key"]: row for row in current.get("pending_overflow", [])}
-    row = pending.get(key) or overflow.get(key)
-    if row is None:
-        raise StewardError("未找到当前待核验事项；不重复写入解决历史")
-    pending.pop(key, None)
-    overflow.pop(key, None)
-    promoted = promote_overflow(pending, overflow)
+    pending = pending_items(current)
+    now = time.time()
+    if resolve:
+        row = pending.pop(key, None)
+        if row is None:
+            raise StewardError("未找到当前待核验事项；不重复写入解决历史")
+    else:
+        row = pending.get(key, {})
+        pending[key] = dict(row, key=key, reason=reason, observed_at=now,
+                            first_observed_at=row.get("first_observed_at", row.get("observed_at", now)))
     history = list(current.get("pending_history", []))
-    history.append(dict(row, status="resolved", resolved_at=time.time(), resolution_reason=reason))
+    if resolve:
+        history.append(dict(row, status="resolved", resolved_at=now, resolution_reason=reason))
     dropped = current.get("pending_history_dropped", 0) + max(0, len(history) - PENDING_HISTORY_LIMIT)
-    current.update(pending=list(pending.values()), pending_overflow=list(overflow.values()),
+    current.pop("pending_overflow", None)
+    current.update(version=1, pending=list(pending.values()),
                    pending_history=history[-PENDING_HISTORY_LIMIT:], pending_history_dropped=dropped)
     store.write("current.json", current)
-    return {"status": "resolved", "key": key, "promoted": promoted, "pending_count": len(pending),
-            "pending_overflow_count": len(overflow), "pending_history_dropped": dropped}
+    return {"status": "resolved" if resolve else "tracked", "key": key,
+            "pending_count": len(pending), "pending_history_dropped": dropped}
 
 
 def patrol(store, policy):
@@ -404,50 +383,7 @@ def patrol(store, policy):
             {key: row[key] for key in ["identity", "rss_bytes", "cpu_percent"]}
             for row in host["processes"]["items"][:20]]}]
         samples = samples[-policy["limits"]["sample_records"]:]
-        findings = memory_findings(samples)
-        for change in changes:
-            rule = next((rule for rule in policy["directory_rules"] if rule["path"] == change["path"]), None)
-            if rule and not change.get("continuity_gap") and not change.get("migration_delta") and change["byte_delta"] >= rule.get("growth_warning_bytes", 4 * 1024**2):
-                findings.append({"key": "growth:" + change["path"], "kind": "directory_growth",
-                                 "path": change["path"], "growth_bytes": change["byte_delta"],
-                                 "reason": "目录增长需要核对任务、写入来源与日志设置；不自动清理"})
-        pending = {row["key"]: row for row in previous.get("pending", [])}
-        overflow = {row["key"]: row for row in previous.get("pending_overflow", [])}
-        if len(pending) > PENDING_LIMIT:
-            raise StewardError("待核验事项超过预算，请先 resolve 释放空间；未推进状态")
-        promote_overflow(pending, overflow)
-        known = set(pending) | set(overflow)
-        unique_new = []
-        for row in findings:
-            key = row["key"]
-            if not isinstance(key, str) or not key or len(key.encode()) > 512:
-                raise StewardError("当前事项 key 无效或超过 512 字节；未推进状态")
-            if key not in known:
-                known.add(key)
-                unique_new.append(key)
-        overflow_additions = max(0, len(unique_new) - (PENDING_LIMIT - len(pending)))
-        if len(overflow) + overflow_additions > PENDING_OVERFLOW_LIMIT:
-            visible = unique_new[:4]
-            hidden = len(unique_new) - len(visible)
-            detail = json.dumps(visible, ensure_ascii=False)
-            suffix = f"，另有 {hidden} 项未显示" if hidden else ""
-            raise StewardError(f"待核验溢出队列达到预算；当前新事项 {detail} 均未保存{suffix}；请先 resolve 释放空间")
-        new_findings = []
-        for row in findings:
-            key = row["key"]
-            old = pending.get(key) or overflow.get(key)
-            if old is None:
-                new_findings.append(row)
-            first_seen = old.get("first_observed_at", old.get("observed_at", now)) if old else now
-            merged = dict(old or {}, **row, first_observed_at=first_seen, observed_at=now)
-            if key in pending:
-                pending[key] = merged
-            elif key in overflow:
-                overflow[key] = merged
-            elif len(pending) < PENDING_LIMIT:
-                pending[key] = merged
-            else:
-                overflow[key] = merged
+        pending = list(pending_items(previous).values())
         history = list(previous.get("pending_history", []))
         history_dropped = previous.get("pending_history_dropped", 0) + max(0, len(history) - PENDING_HISTORY_LIMIT)
         history = history[-PENDING_HISTORY_LIMIT:]
@@ -464,13 +400,14 @@ def patrol(store, policy):
                                             purpose=rule["purpose"] if rule else "unknown", measured_at=now,
                                             complete=snapshot["complete"]))
         state = dict(previous)
+        state.pop("pending_overflow", None)
         state.update({"version": 1, "last_run": {"observed_at": now, "elapsed_seconds": round(time.monotonic() - started, 3),
                       "coverage_complete": set(snapshots) == set(policy["roots"]) and all(snapshot["complete"] for snapshot in snapshots.values()),
                       "state_bytes_before": store.usage()},
                       "host": host, "events": events, "baselines": baselines, "directory_index": directory_index,
                       "coverage_gaps": delta["gaps"], "coverage_scope": coverage_scope, "observation_gaps": observation_gaps,
                       "changes": recent, "change_records_dropped": dropped,
-                      "samples": samples, "pending": list(pending.values()), "pending_overflow": list(overflow.values()),
+                      "samples": samples, "pending": pending,
                       "pending_history": history, "pending_history_dropped": history_dropped})
         ensure_policy_locked(store, policy)
         store.write("current.json", state)
@@ -481,11 +418,10 @@ def patrol(store, policy):
                 "services": dict(host["services"], items=host["services"]["items"][:12]),
                 "events": events, "directories": overview, "changes": changes, "gaps": delta["gaps"],
                 "observation_gaps": observation_gaps, "coverage_scope": coverage_scope,
-                "new_baselines": delta["new_baselines"], "pending": list(pending.values()),
-                "pending_overflow": list(overflow.values()), "pending_history_dropped": history_dropped,
+                "new_baselines": delta["new_baselines"], "pending": pending, "pending_history_dropped": history_dropped,
                 "change_records_dropped": dropped, "state_bytes": store.usage(),
-                "actionable": bool(changes or new_findings or delta["gaps"] != previous.get("coverage_gaps", [])
-                                   or observation_gaps != previous.get("observation_gaps", []) or delta["new_baselines"])}
+                "observations_changed": bool(changes or delta["gaps"] != previous.get("coverage_gaps", [])
+                                             or observation_gaps != previous.get("observation_gaps", []) or delta["new_baselines"])}
 
 
 def emit(value, limit=32768):
@@ -500,17 +436,17 @@ def emit(value, limit=32768):
 
 def main():
     if sys.platform not in ["darwin", "linux"]:
-        raise StewardError("第一版 demo 仅支持 macOS 和 Linux，入口兼容 bash/zsh")
+        raise StewardError("当前工具仅支持 macOS 和 Linux")
     parser = argparse.ArgumentParser(description="Host Steward 0.2 — 有界巡检、本机档案与只读调查")
     commands = parser.add_subparsers(dest="action", required=True)
     init = commands.add_parser("init", help="建立本机约定；默认只读维护范围")
     init.add_argument("--state", required=True)
     init.add_argument("--root", action="append", required=True)
     init.add_argument("--purpose", required=True)
-    for action in ["patrol", "note", "quarantine", "restore", "resolve", "status", "inventory", "inspect"]:
+    for action in ["patrol", "note", "quarantine", "restore", "track", "resolve", "status", "inventory", "inspect"]:
         child = commands.add_parser(action)
         child.add_argument("--state", required=True)
-        if action == "resolve":
+        if action in ["track", "resolve"]:
             child.add_argument("--key", required=True)
             child.add_argument("--reason", required=True)
         if action in ["note", "quarantine"]:
@@ -551,7 +487,7 @@ def main():
     store, policy = load(args.state)
     if args.action == "patrol":
         report = patrol(store, policy)
-        if not args.quiet or report["actionable"]:
+        if not args.quiet or report["observations_changed"]:
             emit(report, store.limits["output_bytes"])
         return
     with store.lock():
@@ -579,15 +515,13 @@ def main():
 
             directories = [row for row in current.get("directory_index", []) if matches_path(row)]
             changes = [row for row in current.get("changes", []) if matches_path(row)]
-            pending = current.get("pending", [])
-            overflow = current.get("pending_overflow", [])
+            pending = list(pending_items(current).values())
             scopes = {root: coverage for root, coverage in current.get("coverage_scope", {}).items()
                       if path is None or within(root, path) or within(path, root)}
             report = {"last_run": current.get("last_run"),
                       "coverage_scope": dict(sorted(scopes.items())[args.offset:args.offset + args.limit]),
                       "coverage_scope_count": len(scopes), "pending": pending[args.offset:args.offset + args.limit],
-                      "pending_count": len(pending), "pending_overflow": overflow[args.offset:args.offset + args.limit],
-                      "pending_overflow_count": len(overflow),
+                      "pending_count": len(pending),
                       "pending_history": current.get("pending_history", [])[-5:],
                       "pending_history_count": len(current.get("pending_history", [])),
                       "pending_history_dropped": current.get("pending_history_dropped", 0), "events": current.get("events"),
@@ -596,8 +530,8 @@ def main():
                       "directory_index": directories[args.offset:args.offset + args.limit],
                       "recent_changes": changes[args.offset:args.offset + args.limit],
                       "operations": read_operations(store)[-args.limit:], "state_bytes": store.usage()}
-        elif args.action == "resolve":
-            report = resolve_pending(store, args.key, args.reason)
+        elif args.action in ["track", "resolve"]:
+            report = update_pending(store, args.key, args.reason, resolve=args.action == "resolve")
         elif args.action == "note":
             report = annotate(store, policy, args.path, args.apply, policy_guard)
         elif args.action == "quarantine":

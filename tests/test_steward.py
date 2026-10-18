@@ -15,7 +15,7 @@ from files import compare, identity, scan
 from maintain import annotate, quarantine, restore
 from observe import command, parse_processes
 from state import Store, StewardError
-from steward import initialize, memory_findings
+from steward import initialize, update_pending
 
 
 class StewardTests(unittest.TestCase):
@@ -165,8 +165,7 @@ class StewardTests(unittest.TestCase):
         tree.mkdir(parents=True)
         destination.mkdir()
         (tree / "file").write_bytes(b"x" * 100)
-        rule = self.rule(destination, "active")
-        rule["growth_warning_bytes"] = 1
+        self.rule(destination, "active")
         self.store.write("host.json", self.policy)
         host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
                 "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
@@ -179,12 +178,11 @@ class StewardTests(unittest.TestCase):
         moved = [row for row in report["changes"] if row["moved"]]
         self.assertTrue(moved)
         self.assertTrue(all(row["average_growth_bytes_per_second"] is None for row in moved))
-        self.assertFalse(any(row["kind"] == "directory_growth" and row["path"] == str(destination)
-                             for row in report["pending"]))
+        self.assertEqual(report["pending"], [])
 
     def test_nested_migration_ancestors_and_aggregated_real_growth(self):
         from steward import patrol
-        self.rule(self.root, "active")["growth_warning_bytes"] = 1
+        self.rule(self.root, "active")
         host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
                 "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
                 "services": {"available": True, "items": []}}
@@ -200,7 +198,7 @@ class StewardTests(unittest.TestCase):
                     nested.mkdir(parents=True)
                     (source / "file").write_bytes(b"x" * 128)
                     (tree / "payload").write_bytes(b"x" * 256)
-                    self.rule(destination, "active")["growth_warning_bytes"] = 1
+                    self.rule(destination, "active")
                     self.policy["limits"]["change_records"] = limit
                     self.store.write("host.json", self.policy)
                     patrol(self.store, self.policy)
@@ -213,8 +211,7 @@ class StewardTests(unittest.TestCase):
                     self.assertEqual(root_change["byte_delta"], 4)
                     self.assertFalse(root_change.get("migration_delta", False))
                     self.assertGreater(root_change["average_growth_bytes_per_second"], 0)
-                    self.assertTrue(any(row["path"] == str(self.root) and row["growth_bytes"] == 4
-                                        for row in report["pending"]))
+                    self.assertEqual(report["pending"], [])
                     if limit == 1:
                         self.assertEqual(len(by_path), 1)
                         self.assertGreater(root_change["moved"], 0)
@@ -223,7 +220,6 @@ class StewardTests(unittest.TestCase):
                         self.assertEqual(ancestor["byte_delta"], 384)
                         self.assertTrue(ancestor["migration_delta"])
                         self.assertIsNone(ancestor["average_growth_bytes_per_second"])
-                        self.assertFalse(any(row["path"] == str(destination) for row in report["pending"]))
 
     def test_directory_to_file_is_one_replacement(self):
         directory = self.root / "replace"
@@ -360,7 +356,7 @@ class StewardTests(unittest.TestCase):
             patrol(self.store, self.policy)
         current = self.store.read("current.json")
         self.assertEqual(current["extension"], {"keep": True})
-        self.assertEqual(current["pending_overflow"], [])
+        self.assertNotIn("pending_overflow", current)
         self.assertEqual(current["pending_history"], [])
 
     def test_current_nested_schema_errors_are_steward_errors(self):
@@ -410,7 +406,7 @@ class StewardTests(unittest.TestCase):
                 with patch("steward.observe") as observation, self.assertRaises(StewardError):
                     patrol(self.store, self.policy)
                 observation.assert_not_called()
-                result = subprocess.run([str(PROJECT / "steward"), "patrol", "--state", str(self.store.path)],
+                result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "patrol", "--state", str(self.store.path)],
                                         capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertEqual(json.loads(result.stderr)["status"], "blocked")
@@ -478,7 +474,7 @@ class StewardTests(unittest.TestCase):
 
     def test_cli_wrong_schema_returns_blocked_json_not_traceback(self):
         self.store.write("current.json", {"version": 1, "baselines": []})
-        result = subprocess.run([str(PROJECT / "steward"), "status", "--state", str(self.store.path)],
+        result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "status", "--state", str(self.store.path)],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(json.loads(result.stderr)["status"], "blocked")
@@ -1032,10 +1028,10 @@ class StewardTests(unittest.TestCase):
             first = patrol(self.store, self.policy)
             second = patrol(self.store, self.policy)
             third = patrol(self.store, self.policy)
-        self.assertTrue(first["actionable"])
-        self.assertFalse(second["actionable"])
+        self.assertTrue(first["observations_changed"])
+        self.assertFalse(second["observations_changed"])
         self.assertEqual(second["observation_gaps"], [{"kind": "events", "reason": "unavailable"}])
-        self.assertTrue(third["actionable"])
+        self.assertTrue(third["observations_changed"])
         self.assertEqual(third["observation_gaps"], [])
         self.assertEqual(third["events"]["cursor"], 20)
         self.assertFalse(third["events"]["cursor_pending"])
@@ -1050,7 +1046,7 @@ class StewardTests(unittest.TestCase):
         with patch("steward.observe", return_value=host), patch("steward.native_events", return_value=events):
             patrol(self.store, self.policy)
             report = patrol(self.store, self.policy)
-        self.assertFalse(report["actionable"])
+        self.assertFalse(report["observations_changed"])
         self.assertEqual(report["observation_gaps"], [])
         self.assertTrue(report["last_run"]["coverage_complete"])
         self.assertEqual(report["events"]["source"], "metadata_snapshot")
@@ -1098,118 +1094,109 @@ class StewardTests(unittest.TestCase):
         self.assertNotEqual(rows[0]["identity"], rows[1]["identity"])
         self.assertIn("unknown", rows[0]["protection"])
 
-    def test_memory_growth_is_only_suspicion_with_same_identity(self):
-        samples = [{"time": i * 300, "processes": [{"identity": "same", "rss_bytes": (100 + i * 50) * 1024**2}]} for i in range(4)]
-        self.assertEqual(memory_findings(samples)[0]["kind"], "suspected_memory_growth")
-        for i, sample in enumerate(samples):
-            sample["processes"][0]["identity"] = str(i)
-        self.assertEqual(memory_findings(samples), [])
-
-    def test_pending_overflow_preserves_patrol_progress(self):
-        from unittest.mock import patch
+    def test_growth_observations_are_saved_for_agent_without_automatic_findings(self):
         from steward import patrol
-        rows = [{"key": f"old:{i}", "kind": "directory_growth", "observed_at": 1} for i in range(64)]
-        self.store.write("current.json", {"version": 1, "baselines": {}, "changes": [], "samples": [], "pending": rows})
+        # 旧阈值配置仍可读取；增长事实由 agent 判断，不再自动生成待办。
+        self.rule(self.root, "active")["growth_warning_bytes"] = 1
+        self.store.write("host.json", self.policy)
         host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
-                "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
+                "model_usage": {}, "storage": [], "processes": {"available": True, "items": [
+                    {"identity": "same", "rss_bytes": 400 * 1024**2, "cpu_percent": 2.0}]},
                 "services": {"available": True, "items": []}}
-        finding = {"key": "new", "kind": "directory_growth", "path": str(self.root)}
-        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": True}), \
-             patch("steward.scan", return_value={}), patch("steward.memory_findings", return_value=[finding]):
-            first = patrol(self.store, self.policy)
+        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": True}):
+            patrol(self.store, self.policy)
             current = self.store.read("current.json")
-            self.assertEqual(len(current["pending"]), 64)
-            self.assertEqual(current["pending_overflow"][0]["key"], "new")
-            self.assertIsNotNone(current["last_run"])
-            self.assertTrue(first["actionable"])
-            first_seen = current["pending_overflow"][0]["first_observed_at"]
-            second = patrol(self.store, self.policy)
-        self.assertFalse(second["actionable"])
-        self.assertEqual(len(second["pending_overflow"]), 1)
-        self.assertEqual(second["pending_overflow"][0]["first_observed_at"], first_seen)
-
-    def test_resolve_pending_promotes_overflow_and_allows_reopening(self):
-        from unittest.mock import patch
-        from steward import patrol, resolve_pending
-        pending = [{"key": f"old:{i}", "kind": "directory_growth", "observed_at": i} for i in range(64)]
-        overflow = [{"key": "queued", "kind": "directory_growth", "observed_at": 65},
-                    {"key": "queued-two", "kind": "directory_growth", "observed_at": 66}]
-        self.store.write("current.json", {"version": 1, "baselines": {}, "changes": [], "samples": [],
-                                          "pending": pending, "pending_overflow": overflow})
-        result = resolve_pending(self.store, "old:0", "已核对一次性格增长")
-        self.assertEqual(result["promoted"], ["queued"])
-        self.assertEqual(result["pending_count"], 64)
-        self.assertEqual(result["pending_overflow_count"], 1)
-        resolve_pending(self.store, "queued-two", "已核对溢出事项")
-        current = self.store.read("current.json")
-        self.assertEqual(len(current["pending_history"]), 2)
-        self.assertFalse(current["pending_overflow"])
-        host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
-                "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
-                "services": {"available": True, "items": []}}
-        finding = {"key": "old:0", "kind": "directory_growth", "path": str(self.root)}
-        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": True}), \
-             patch("steward.scan", return_value={}), patch("steward.memory_findings", return_value=[finding]):
+            current["samples"] = [{"time": time.time() - (4 - i) * 300, "processes": [
+                {"identity": "same", "rss_bytes": (100 + i * 50) * 1024**2}]} for i in range(4)]
+            self.store.write("current.json", current)
+            (self.root / "large.log").write_bytes(b"x" * 1024**2)
             report = patrol(self.store, self.policy)
-        self.assertTrue(report["actionable"])
-        self.assertEqual(report["pending_overflow"][0]["key"], "old:0")
+        saved = self.store.read("current.json")
+        self.assertEqual(report["pending"], [])
+        self.assertTrue(report["observations_changed"])
+        self.assertEqual(report["changes"][0]["byte_delta"], 1024**2)
+        self.assertEqual(len(saved["samples"]), 5)
+        self.assertEqual(saved["samples"][-1]["processes"][0]["rss_bytes"], 400 * 1024**2)
 
-    def test_pending_overflow_limit_blocks_with_current_key(self):
-        from unittest.mock import patch
-        from steward import patrol
-        pending = [{"key": f"old:{i}", "kind": "directory_growth"} for i in range(64)]
-        overflow = [{"key": f"queued:{i}", "kind": "directory_growth"} for i in range(64)]
-        self.store.write("current.json", {"version": 1, "baselines": {}, "changes": [], "samples": [],
-                                          "pending": pending, "pending_overflow": overflow})
+    def test_track_updates_reason_preserves_first_seen_and_allows_reopening(self):
+        update_pending(self.store, "task:review", "核对用途和重新下载的成本")
+        first = self.store.read("current.json")["pending"][0]["first_observed_at"]
+        update_pending(self.store, "task:review", "已找到来源，继续核对版本")
+        current = self.store.read("current.json")
+        self.assertEqual(len(current["pending"]), 1)
+        self.assertEqual(current["pending"][0]["first_observed_at"], first)
+        self.assertEqual(current["pending"][0]["reason"], "已找到来源，继续核对版本")
+        update_pending(self.store, "task:review", "已核实，继续保留", resolve=True)
         before = self.store.target("current.json").read_bytes()
+        with self.assertRaises(StewardError):
+            update_pending(self.store, "task:review", "重复关闭", resolve=True)
+        self.assertEqual(self.store.target("current.json").read_bytes(), before)
+        update_pending(self.store, "task:review", "来源已变更，需要重新核对")
+        current = self.store.read("current.json")
+        self.assertEqual(len(current["pending"]), 1)
+        self.assertEqual(current["pending_history"][0]["resolution_reason"], "已核实，继续保留")
+
+    def test_legacy_queues_merge_without_losing_records_or_blocking_patrol(self):
+        from steward import patrol
+        pending = [{"key": f"old:{i}", "kind": "directory_growth", "observed_at": i} for i in range(64)]
+        overflow = [{"key": f"queued:{i}", "reason": "旧版发现，仍待核验"} for i in range(64)]
+        self.store.write("current.json", {"version": 1, "extension": {"keep": True},
+                                          "pending": pending, "pending_overflow": overflow})
         host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
                 "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
                 "services": {"available": True, "items": []}}
-        finding = {"key": "overflow-key", "kind": "directory_growth"}
-        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": True}), \
-             patch("steward.scan", return_value={}), patch("steward.memory_findings", return_value=[finding]):
-            with self.assertRaisesRegex(StewardError, "overflow-key"):
-                patrol(self.store, self.policy)
-        self.assertEqual(self.store.target("current.json").read_bytes(), before)
+        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": True}):
+            report = patrol(self.store, self.policy)
+        self.assertEqual(report["pending"], pending + overflow)
+        self.assertTrue(report["last_run"]["coverage_complete"])
+        self.assertNotIn("pending_overflow", self.store.read("current.json"))
+        update_pending(self.store, "queued:0", "已核验旧版溢出事项", resolve=True)
+        update_pending(self.store, "new", "由 agent 新发现的工作")
+        current = self.store.read("current.json")
+        self.assertEqual(len(current["pending"]), 128)
+        self.assertEqual(current["extension"], {"keep": True})
 
-    def test_pending_capacity_precheck_reports_current_keys_and_key_limit(self):
-        from unittest.mock import patch
-        from steward import patrol
-        pending = [{"key": f"old:{i}", "kind": "directory_growth"} for i in range(64)]
-        overflow = [{"key": f"queued:{i}", "kind": "directory_growth"} for i in range(63)]
-        self.store.write("current.json", {"version": 1, "baselines": {}, "changes": [], "samples": [],
-                                          "pending": pending, "pending_overflow": overflow})
+    def test_pending_validation_and_capacity_failure_preserve_state(self):
+        update_pending(self.store, "existing", "继续跟踪")
         before = self.store.target("current.json").read_bytes()
-        host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
-                "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
-                "services": {"available": True, "items": []}}
-        findings = [{"key": "first-key", "kind": "directory_growth"},
-                    {"key": "second-key", "kind": "directory_growth"}]
-        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": True}), \
-             patch("steward.scan", return_value={}), patch("steward.memory_findings", return_value=findings):
-            with self.assertRaises(StewardError) as caught:
-                patrol(self.store, self.policy)
-        self.assertIn("first-key", str(caught.exception))
-        self.assertIn("second-key", str(caught.exception))
-        self.assertEqual(self.store.target("current.json").read_bytes(), before)
-        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": True}), \
-             patch("steward.scan", return_value={}), patch("steward.memory_findings", return_value=[{"key": "x" * 513}]):
-            with self.assertRaisesRegex(StewardError, "512"):
-                patrol(self.store, self.policy)
+        for key, reason in [("", "说明"), ("x" * 513, "说明"), ("new", " "), ("new", "x" * 513)]:
+            with self.subTest(key=key[:10], reason=reason[:10]), self.assertRaises(StewardError):
+                update_pending(self.store, key, reason)
+        small = Store(self.store.path, dict(self.policy["limits"], total_bytes=self.store.usage() + 1))
+        with self.assertRaises(StewardError):
+            update_pending(small, "new", "预算不足时保留旧状态")
         self.assertEqual(self.store.target("current.json").read_bytes(), before)
 
-    def test_status_pages_pending_and_overflow(self):
+    def test_cli_tracks_reads_and_resolves_agent_decisions_across_processes(self):
+        policy_before = self.store.target("host.json").read_bytes()
+        for action, extra in [("track", ["--key", "review", "--reason", "核对资料用途"]),
+                              ("status", []),
+                              ("resolve", ["--key", "review", "--reason", "已确认长期保留"])]:
+            result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), action,
+                                     "--state", str(self.store.path), *extra],
+                                    cwd="/", capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["pending_count"], 0 if action == "resolve" else 1)
+            if action == "status":
+                self.assertEqual(report["pending"][0]["reason"], "核对资料用途")
+        self.assertEqual(self.store.target("host.json").read_bytes(), policy_before)
+        self.assertEqual(self.store.read("current.json")["pending_history"][0]["resolution_reason"], "已确认长期保留")
+
+    def test_status_pages_legacy_queues_as_one_list(self):
         pending = [{"key": f"old:{i}", "kind": "directory_growth"} for i in range(25)]
         overflow = [{"key": f"queued:{i}", "kind": "directory_growth"} for i in range(3)]
         self.store.write("current.json", {"version": 1, "pending": pending, "pending_overflow": overflow})
-        result = subprocess.run([str(PROJECT / "steward"), "status", "--state", str(self.store.path),
+        result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "status", "--state", str(self.store.path),
                                  "--limit", "2", "--offset", "1"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual([row["key"] for row in report["pending"]], ["old:1", "old:2"])
-        self.assertEqual(report["pending_count"], 25)
-        self.assertEqual([row["key"] for row in report["pending_overflow"]], ["queued:1", "queued:2"])
-        self.assertEqual(report["pending_overflow_count"], 3)
+        self.assertEqual(report["pending_count"], 28)
+        result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "status", "--state", str(self.store.path),
+                                 "--limit", "2", "--offset", "25"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([row["key"] for row in json.loads(result.stdout)["pending"]], ["queued:0", "queued:1"])
 
     def test_status_path_matches_legacy_alias_without_rewriting(self):
         alias = self.base / "old-index-alias"
@@ -1218,7 +1205,7 @@ class StewardTests(unittest.TestCase):
                          "directory_index": [{"root": str(self.root), "path": str(alias)}],
                          "changes": [{"path": str(alias), "observed_at": time.time()}]})
         before = self.store.target("current.json").read_bytes()
-        result = subprocess.run([str(PROJECT / "steward"), "status", "--state", str(self.store.path),
+        result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "status", "--state", str(self.store.path),
                                  "--path", str(self.root)], capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
@@ -1228,11 +1215,10 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(self.store.target("current.json").read_bytes(), before)
 
     def test_pending_history_is_bounded(self):
-        from steward import resolve_pending
         rows = [{"key": f"old:{i}", "kind": "directory_growth"} for i in range(33)]
         self.store.write("current.json", {"version": 1, "pending": rows})
         for row in rows:
-            resolve_pending(self.store, row["key"], "已处理")
+            update_pending(self.store, row["key"], "已处理", resolve=True)
         current = self.store.read("current.json")
         self.assertEqual(len(current["pending_history"]), 32)
         self.assertEqual(current["pending_history_dropped"], 1)
@@ -1306,25 +1292,26 @@ class StewardTests(unittest.TestCase):
         with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": False}):
             patrol(self.store, self.policy)
             host["processes"].update(available=False, reason="permission_denied")
-            self.assertTrue(patrol(self.store, self.policy)["actionable"])
-            self.assertFalse(patrol(self.store, self.policy)["actionable"])
+            self.assertTrue(patrol(self.store, self.policy)["observations_changed"])
+            self.assertFalse(patrol(self.store, self.policy)["observations_changed"])
         self.assertEqual(self.store.read("current.json")["observation_gaps"][0]["kind"], "processes")
 
-    def test_shell_entry_works_in_bash_and_zsh(self):
-        for shell in ["/bin/bash", "/bin/zsh"]:
-            if Path(shell).exists():
-                result = subprocess.run([shell, str(PROJECT / "steward"), "--help"], capture_output=True, timeout=5)
-                self.assertEqual(result.returncode, 0, result.stderr)
+    def test_python_entry_works_outside_project_directory(self):
+        result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "--help"],
+                                cwd="/", capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Host Steward", result.stdout)
 
-    def test_shell_entry_handles_space_in_its_directory(self):
+    def test_python_entry_handles_space_in_its_directory(self):
         directory = self.base / "skill with spaces"
-        directory.mkdir()
-        (directory / "steward").write_bytes((PROJECT / "steward").read_bytes())
-        (directory / "tools").symlink_to(PROJECT / "tools", target_is_directory=True)
-        for shell in ["/bin/bash", "/bin/zsh"]:
-            if Path(shell).exists():
-                result = subprocess.run([shell, str(directory / "steward"), "--help"], capture_output=True, timeout=5)
-                self.assertEqual(result.returncode, 0, result.stderr)
+        tools = directory / "tools"
+        tools.mkdir(parents=True)
+        for source in (PROJECT / "tools").glob("*.py"):
+            (tools / source.name).write_bytes(source.read_bytes())
+        result = subprocess.run([sys.executable, str(tools / "steward.py"), "--help"],
+                                cwd="/", capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Host Steward", result.stdout)
 
 
 if __name__ == "__main__":

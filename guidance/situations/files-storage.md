@@ -75,8 +75,8 @@ SQLite WAL 属于数据库持久状态，应通过数据库支持的方式维护
 `note` 与 `quarantine` 默认预览，确认计划符合本机约定后才加 `--apply`：
 
 ```sh
-./steward note --state /本机状态 --path /约定目录
-./steward quarantine --state /本机状态 --path /约定临时文件
+python3 /skill目录/tools/steward.py note --state /本机状态 --path /约定目录
+python3 /skill目录/tools/steward.py quarantine --state /本机状态 --path /约定临时文件
 ```
 
 `quarantine` 只接收明确授权、满足期限的 temporary 普通文件，并核对目录身份和待回收区 `recycle_bytes` 预算。使用中的文件先处理使用关系；`AGENTS.md`、已在待回收区的对象和状态目录子树均不作为回收目标。

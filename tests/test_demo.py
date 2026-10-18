@@ -24,7 +24,7 @@ class DemoTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def cli(self, workspace):
-        return subprocess.run([str(PROJECT / "steward"), "demo", "--workspace", str(workspace)],
+        return subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "demo", "--workspace", str(workspace)],
                               cwd="/", capture_output=True, text=True, timeout=60)
 
     def assert_blocked(self, result):

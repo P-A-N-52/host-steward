@@ -10,7 +10,6 @@ from state import StewardError, decode, encode, read_regular_bytes
 from state_schema import timestamp_seconds
 
 
-KINDS = {"directory", "file", "service", "cache", "model", "backup"}
 TEXT_FIELDS = {"purpose": 1024, "owner": 256, "retention": 1024, "maintenance": 2048, "source": 1024}
 RECORD_FIELDS = {"id", "kind", "locator", "basis", "dependencies", "evidence_at", "review_after_hours", *TEXT_FIELDS}
 SERVICE = re.compile(r"(launchd|systemd):(user|system)/([A-Za-z0-9_][A-Za-z0-9_.@:-]{0,191})\Z")
@@ -28,7 +27,8 @@ def validate_record(record, require_canonical=True):
         raise StewardError("资源档案字段不完整或包含未知字段；档案不能保存授权")
     if not isinstance(record["id"], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", record["id"]):
         raise StewardError("资源 id 需为最多 64 个字母、数字、点、下划线或连字符")
-    if not isinstance(record["kind"], str) or record["kind"] not in KINDS or not isinstance(record["basis"], str) or record["basis"] not in {"observed", "reported", "user_statement"}:
+    kind = record["kind"]
+    if not isinstance(kind, str) or not kind.strip() or len(kind.encode()) > 64 or not isinstance(record["basis"], str) or record["basis"] not in {"observed", "reported", "user_statement"}:
         raise StewardError("资源类别或依据类型无效")
     for key, limit in {**TEXT_FIELDS, "locator": 1024}.items():
         if not isinstance(record[key], str) or not record[key].strip() or len(record[key].encode()) > limit:
