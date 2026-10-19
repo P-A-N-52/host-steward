@@ -46,3 +46,15 @@ host-steward/
 ```
 
 项目目标见 [charter.md](charter.md)，设计细节与当前实现范围见 [design.md](design.md)。
+
+## 开发
+
+仓库开发约定见 [AGENTS.md](AGENTS.md)。统一测试入口：
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+## 许可证
+
+本项目以 [MIT 许可证](LICENSE)发布。
