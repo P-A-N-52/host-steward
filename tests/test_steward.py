@@ -1566,6 +1566,70 @@ class StewardTests(unittest.TestCase):
             self.assertEqual(len(current["changes"]), 2)
             self.assertEqual(current["change_records_dropped"], 5)
 
+    def test_changes_window_reports_effective_span(self):
+        from unittest.mock import patch
+        from steward import patrol
+        host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
+                "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
+                "services": {"available": True, "items": []}}
+        parents = ["old-a", "keep-b", "keep-c"]
+        for name in parents:
+            (self.root / name).mkdir()
+        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": False}):
+            patrol(self.store, self.policy)
+            for name in parents:
+                (self.root / name / "seed").write_text("x")
+            patrol(self.store, self.policy)
+            now = time.time()
+            current = self.store.read("current.json")
+            # 三条记录跨越 30 小时：条数上限未生效，实际窗口应小于声明的 48 小时
+            ages = [30 * 3600, 10 * 3600, 0]
+            for row, age in zip(sorted(current["changes"], key=lambda r: r["path"]), ages):
+                row["observed_at"] = now - age
+            self.store.write("current.json", current)
+            (self.root / "new-d").mkdir()
+            (self.root / "new-d" / "seed").write_text("x")
+            patrol(self.store, self.policy)
+            current = self.store.read("current.json")
+            window = current["changes_window"]
+            self.assertEqual(window["declared_hours"], 48)
+            # 条数上限未生效，窗口内的记录没有被挤掉
+            self.assertFalse(window["truncated_by_count"])
+            # 实际跨度反映保留记录的真实时间范围
+            self.assertLess(window["hours"], 48)
+            self.assertGreater(window["hours"], 29)
+
+    def test_changes_window_marks_count_limit_truncation(self):
+        from unittest.mock import patch
+        from steward import patrol
+        host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
+                "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
+                "services": {"available": True, "items": []}}
+        parents = ["old-a", "keep-b", "keep-c"]
+        for name in parents:
+            (self.root / name).mkdir()
+        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": False}):
+            patrol(self.store, self.policy)
+            for name in parents:
+                (self.root / name / "seed").write_text("x")
+            patrol(self.store, self.policy)
+            now = time.time()
+            current = self.store.read("current.json")
+            for row in current["changes"]:
+                row["observed_at"] = now - 2 * 3600
+            self.store.write("current.json", current)
+            # 条数上限收紧到 2：仍在保留期内的记录被挤掉
+            self.policy["limits"]["change_records"] = 2
+            self.store.write("host.json", self.policy)
+            (self.root / "new-d").mkdir()
+            (self.root / "new-d" / "seed").write_text("x")
+            patrol(self.store, self.policy)
+            current = self.store.read("current.json")
+            window = current["changes_window"]
+            self.assertTrue(window["truncated_by_count"])
+            self.assertEqual(window["declared_hours"], 48)
+            self.assertGreater(current["change_records_dropped"], 0)
+
     def test_partial_patrol_preserves_last_directory_index(self):
         from unittest.mock import patch
         from steward import patrol

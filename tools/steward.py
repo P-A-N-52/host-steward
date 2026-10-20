@@ -383,7 +383,18 @@ def patrol(store, policy):
         recent = [row for row in previous.get("changes", [])
                   if now - row["observed_at"] <= policy["limits"]["retention_hours"] * 3600] + changes
         dropped = max(0, len(recent) - policy["limits"]["change_records"])
+        # 被条数上限挤掉的记录都还在保留期内（recent 已按 retention_hours 过滤），
+        # 所以 dropped 非零即表示条数上限挤走了窗口内的记录。
+        truncated_by_count = dropped > 0
         recent = recent[-policy["limits"]["change_records"]:]
+        # 实际可用窗口：条数上限先于时间上限生效时，声明的 retention_hours 达不到。
+        window_hours = policy["limits"]["retention_hours"]
+        if recent:
+            observed = [row["observed_at"] for row in recent]
+            window_hours = round((max(observed) - min(observed)) / 3600, 2)
+        changes_window = {"hours": window_hours,
+                          "declared_hours": policy["limits"]["retention_hours"],
+                          "truncated_by_count": truncated_by_count}
         samples = previous.get("samples", []) + [{"time": now,
                                                   "processes": [{key: row[key] for key in ["identity", "rss_bytes", "cpu_percent"]}
                                                                 for row in host["processes"]["items"][:20]],
@@ -412,7 +423,7 @@ def patrol(store, policy):
                       "state_bytes_before": store.usage()},
                       "host": host, "events": events, "baselines": baselines, "directory_index": directory_index,
                       "coverage_gaps": delta["gaps"], "coverage_scope": coverage_scope, "observation_gaps": observation_gaps,
-                      "changes": recent, "change_records_dropped": dropped,
+                      "changes": recent, "change_records_dropped": dropped, "changes_window": changes_window,
                       "samples": samples, "pending": pending,
                       "pending_history": history, "pending_history_dropped": history_dropped})
         ensure_policy_locked(store, policy)
@@ -436,7 +447,8 @@ def patrol(store, policy):
                 "events": events, "directories": overview, "changes": changes, "gaps": delta["gaps"],
                 "observation_gaps": observation_gaps, "coverage_scope": coverage_scope,
                 "new_baselines": delta["new_baselines"], "pending": pending, "pending_history_dropped": history_dropped,
-                "change_records_dropped": dropped, "capacity": capacity, "state_bytes": capacity["state_bytes"],
+                "change_records_dropped": dropped, "changes_window": changes_window,
+                "capacity": capacity, "state_bytes": capacity["state_bytes"],
                 "observations_changed": bool(changes or delta["gaps"] != previous.get("coverage_gaps", [])
                                              or observation_gaps != previous.get("observation_gaps", []) or delta["new_baselines"])}
 

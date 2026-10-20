@@ -29,7 +29,7 @@
 
 ## 待核验事项与记录收尾
 
-普通变化按 `host.json.limits` 的窗口和条数滚动保留，淘汰数量可见。agent 用 `track` 登记需要跨轮跟进的事项，说明判断依据、未知项和下一步；相同 key 更新说明并保留首次登记时间。确认已处理或无需跟进后用 `resolve` 关闭：
+普通变化按 `host.json.limits` 的窗口和条数滚动保留，淘汰数量可见。`change_records_dropped` 是**滚动淘汰的条数**，稳态下必然非零：每轮新增多少条就淘汰多少条，它不表示数据丢失，不能因为它非零就判定异常。条数上限先于时间上限生效时，声明的 `retention_hours` 达不到，以 `changes_window.hours` 为准，`changes_window.truncated_by_count` 为真表示窗口被条数上限截短。需要报警的是状态写入被拒（`capacity.writable` 为假）或覆盖缺口，不是淘汰数量本身。agent 用 `track` 登记需要跨轮跟进的事项，说明判断依据、未知项和下一步；相同 key 更新说明并保留首次登记时间。确认已处理或无需跟进后用 `resolve` 关闭：
 
 ```sh
 python3 /skill目录/tools/steward.py track --state /本机状态 --key 事项键 --reason '判断依据、待查问题和下一步'

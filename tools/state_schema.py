@@ -188,6 +188,13 @@ def read_current(store):
     for key in ["change_records_dropped", "pending_history_dropped"]:
         if key in data:
             require(integer(data[key]) and data[key] >= 0, name, f"{key} 必须是非负整数")
+    if "changes_window" in data:
+        window = data["changes_window"]
+        require(isinstance(window, dict), name, "changes_window 必须是对象")
+        require(number(window.get("hours")) and window["hours"] >= 0, name, "changes_window.hours 无效")
+        require(integer(window.get("declared_hours")) and window["declared_hours"] >= 0,
+                name, "changes_window.declared_hours 必须是非负整数")
+        require(type(window.get("truncated_by_count")) is bool, name, "changes_window.truncated_by_count 必须是布尔值")
     return data
 
 
