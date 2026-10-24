@@ -29,6 +29,7 @@ description: 保护与维护受托的 macOS/Linux 主机，了解常驻程序、
 | --- | --- |
 | 接管新主机、配置本机约定或升级指导 | [接管与配置](guidance/setup.md) |
 | 日常巡检、安排维护和收尾 | [日常巡检](guidance/patrol.md) |
+| 运行本机自定义检查、读取脚本结果 | [自定义检查](guidance/situations/custom-checks.md) |
 | 查用途、依赖、旧记录，或针对对象调查 | [本机档案与只读调查](guidance/inventory.md) |
 | CPU、内存等资源异常 | [常驻程序与资源异常](guidance/situations/resources.md) |
 | 文件变化、日志增长、收纳或回收 | [文件与存储](guidance/situations/files-storage.md) |

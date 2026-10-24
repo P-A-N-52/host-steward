@@ -10,6 +10,7 @@
 | 管理范围 | 观察目录与排除项；可变更的目录、服务和动作；共享区域及其他用户的边界 | `host.json` 的观察范围、保护与授权条目 |
 | 保护与保留 | 重要冷资料、活跃任务、依赖和恢复材料；临时内容的保留起点、期限与回收额度 | `host.json.directory_rules` 与资源档案；档案只保存依据和授权位置 |
 | 工作预算 | 扫描、采样、记录和输出上限；agent 单轮时长、模型开销、电源和负载下的工作条件 | 工具预算在 `host.json.limits`；agent 执行限制在宿主配置 |
+| 自定义检查 | 需要工具代跑的本机健康脚本；用途、完整命令、运行用户、超时与输出预算、副作用和结果去向 | `host.json.custom_checks`（[说明](situations/custom-checks.md)）；脚本与运行日志按本机既有位置保存 |
 | 调用入口 | 本机 skill、独立状态目录和 Python 解释器的绝对路径；以哪个用户运行 | 本地 agent 的既有持久记录与任务配置 |
 | 定时安排 | 使用哪个调度机制、时区、具体时刻或间隔、允许维护的时间段，以及暂停和恢复办法 | 宿主任务配置，记录任务标识供后续查询 |
 | 通知方式 | 正常结果是否汇总、汇总时间与渠道；异常和需要用户取舍时如何通知 | 宿主通知配置与本机巡检指导 |
@@ -99,6 +100,16 @@ python3 /skill目录/tools/steward.py upgrade --state /本机状态 --apply --ba
 初始常驻清单与目录规则为空，按接管结果在 `host.json` 中填写。v2 的每个 root 包含 `path`、`max_depth`、`exclude_names` 和 `exclude_paths`：`max_depth` 为非负整数，0 表示只检查 root 的直属条目；`exclude_names` 按单层名称匹配，`exclude_paths` 相对于该 root、按路径分量匹配指定文件或子树，不能越出 root。root 与规则路径使用无符号链接的规范绝对路径，保留原有大小写、Unicode 与空格；root 之间不能重叠或指向同一 `samefile` 对象。目录规则包含 `path`、`purpose` 和 `kind`。类别由 agent 按本机用途命名，为最多 64 字节的非空短文本；可沿用 cold / temporary / active / service。每个规范路径配置一条，嵌套目录采用最具体的规则。类别本身不增加权限，`allow_notes`、`allow_quarantine` 缺省为不允许，按接管时确认的动作填写；当前回收工具只接受明确授权的 `temporary` 文件。
 
 `sampling` 只在 v2 使用，包含主机采样间隔、单轮时间预算、进程采样间隔、每页进程数、历史条数与保留小时；字段必须是完整正整数，单轮时间预算不得大于主机采样间隔，`process_interval_seconds` 不得小于 `interval_seconds`。`cycle_seconds` 是单批命令的真实耗时预算：macOS 的 `iostat -c 2` 自身约需 1 秒，周期低于实际命令下限（如 1 秒）时整批按预算失败并记录缺口，不会伪造样本；调整周期前先用 `collect --once` 核对本机实际耗时。旧 v1 主机继续按字符串 root、顶层排除项与 `limits.scan_depth` 读取和巡检；使用上节 `upgrade` 显式转换后再启用 v2 设置，不能把两套规则同时当作活动来源。
+
+`custom_checks` 是顶层可选数组，省略等价于空数组；`init` 模板写入空数组。每项必须有且仅有 `name`、`command`、`purpose`：名称在同一配置内唯一；`command` 是 1–16 个非空参数，首项为绝对路径，工具直接执行、不经过 shell、不按 PATH 查找；用途为不超过 512 字节的非空短文本。只登记用户确认过用途、命令、运行用户、预算和副作用的脚本。脚本以当前用户权限运行，工具只能限制时间和输出，不能保证只读；新增或修改是有副作用的授权变更，先说明影响并保存 `host.json` 副本。结果不写入状态，`patrol` 也不会自动运行，运行时机、失败语义和调度方式见[自定义检查](situations/custom-checks.md)。
+
+```sh
+python3 /skill目录/tools/steward.py check --state /绝对路径/本机状态
+python3 /skill目录/tools/steward.py check --state /绝对路径/本机状态 --name backup-freshness
+python3 /skill目录/tools/steward.py check --state /绝对路径/本机状态 --all
+```
+
+列出模式只展示配置与 `executable_available`，不运行脚本；`--name` 与 `--all` 互斥，运行受 `limits.scan_seconds`、`command_bytes` 和 `output_bytes` 约束。任一执行项失败、超时、输出超限或预算跳过，或整份终端输出被裁剪时退出 2。
 
 v2 主机可用 `collect` 前台常驻采集，由宿主管理进程生命周期（本工具不安装开机服务、不派生后台进程）：
 

@@ -46,6 +46,21 @@ python3 /skill目录/tools/steward.py samples --state /本机状态 --raw --outp
 
 阈值可以筛选需要调查的候选；是否异常、是否通知由 agent 结合用途、任务进展和持续影响判断。宿主确需候选筛选阈值时，放在其可审阅的本机配置中，写明用途与采样口径；应用名称排除表会隐藏相关观测，应由 agent 根据上下文辨认正常工作。进程上下文的调查方法见[资源指导](situations/resources.md#核对资源来自哪里)。
 
+## 自定义检查
+
+`patrol` 不会自动运行 `host.json.custom_checks`。只有主机已配置检查、且本轮任务需要核对相应健康状态时，才在完成常规巡检后显式运行；配置、脚本契约和授权边界见[自定义检查](situations/custom-checks.md)。
+
+```sh
+python3 /skill目录/tools/steward.py check --state /本机状态 --all
+python3 /skill目录/tools/steward.py check --state /本机状态 --name backup-freshness
+```
+
+先运行 `--all` 做批量检查；某项失败、超时、输出超限或总预算跳过时，再用 `--name` 复跑该项并读取完整结果。读取 `complete`、`failed`、`skipped` 和每项 `status`：`ok` 只表示脚本按约定退出 0，检查结论仍要看 `data`/`output`；`failed` 要区分非零退出与无法执行；`timeout`、`output_limited` 和 `skipped_budget` 表示没有取得结果，不能当作正常。CLI 退出 2 表示至少一项未成功或终端输出被裁剪，本轮报告要如实说明。
+
+处理失败时先核对脚本、命令绝对路径、运行用户和预算，判断是脚本结论还是执行问题；脚本损坏或需要调整时，向用户说明并取得确认后再改 `host.json`。`output_limited` 用 `--name` 缩小返回范围；超时先实测耗时，再决定拆分检查或请用户确认调整 `scan_seconds`。发现的长期事项用 `track`，目录说明用 `note`；检查结果本身不落状态，需要运行证据时保存在宿主调度日志或当轮汇总中。
+
+需要例行运行时，在宿主调度中显式调用 `check`，使用绝对路径并保存输出与退出码；可与巡检合并为同一轮，也可单独安排，但不要让两个任务并发运行同一组有副作用的脚本。`custom_checks` 配置本身不会创建任务，也不会让 `patrol` 自动执行脚本。
+
 ## 待核验事项与记录收尾
 
 普通变化按 `host.json.limits.retention_hours` 与 `change_records` 两个上限滚动保留：先移除到期记录，再按条数保留最近写入的记录。时间上限表示最长保留年龄，实际保留范围同时受条数限制。`patrol` 与 `status` 的 `change_retention` 描述最近一次成功巡检保存的全局历史，独立于查询路径与分页：

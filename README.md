@@ -33,6 +33,8 @@ https://github.com/P-A-N-52/host-steward
 
 动态状态保存在每台主机独立的 `steward.sqlite3` 中，本机约定 `host.json` 和指导保留为可直接审阅的文件。已有 JSON 状态通过显式迁移接入；迁移、查询导出和数据库备份见[首次接管](guidance/setup.md#旧状态迁移与导出)。
 
+需要例行核对的本机健康脚本可以在 `host.json` 的 `custom_checks` 中登记，由 `steward.py check` 按显式授权、在时间和输出预算内直接执行，不经过 shell；结果不自动写入状态，`patrol` 也不会隐式运行。配置与脚本契约见[自定义检查](guidance/situations/custom-checks.md)。
+
 ## 项目结构
 
 AI 实际使用的目录：

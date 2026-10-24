@@ -24,6 +24,7 @@ python3 tools/steward.py status --state /本机状态         # 状态读回
 python3 tools/steward.py patrol --state /本机状态         # 实机巡检
 python3 tools/steward.py collect --state /本机状态 --once # 常驻采集验证一批
 python3 tools/steward.py samples --state /本机状态        # 资源历史查询
+python3 tools/steward.py check --state /本机状态          # 自定义检查列表；--name NAME 或 --all 运行
 ```
 
 验证直接使用实机与正式 CLI，记录实际操作、原始返回、耗时和独立读回结果。历史测试代码用于查阅案例，验收依据实操证据。`.demo/` 与 `.local-state/` 中的已有运行资料继续保留。
@@ -42,6 +43,7 @@ python3 tools/steward.py samples --state /本机状态        # 资源历史查�
 | `sample_store.py` | 独立资源样本、来源、运行与缺口的增量存储和有限查询 |
 | `resource_changes.py`、`resource_query.py` | 资源连续性、差分口径和有界查询摘要 |
 | `storage_tools.py` | 旧 JSON 显式迁移、配置与结构升级、数据导出与数据库备份 |
+| `custom_checks.py` | 显式授权的自定义检查：配置读取、无 shell 有界执行、JSON/文本结果整形与失败语义 |
 | `inventory.py`、`investigate.py` | 长期档案、文件引用与服务调查 |
 | `maintain.py` | 维护动作与恢复 |
 
@@ -52,6 +54,7 @@ python3 tools/steward.py samples --state /本机状态        # 资源历史查�
 涉及工具、状态语义或安全边界时，先读章程和设计，再读对应指导。运行规则在 [SKILL.md](SKILL.md)，具体工具约定集中在以下位置，修改行为时同步核对相关测试：
 
 - [首次接管](guidance/setup.md)：初始化输入、目录规则和预算来源。`LIMIT_FIELDS`（v2）与 `LEGACY_LIMIT_FIELDS`（v1）是工具内的预算键集契约，模板只在初始化时提供默认值；v2 的深度与排除项属于各 root，`sampling` 单独校验。
+- [自定义检查](guidance/situations/custom-checks.md)：`custom_checks` 字段与预算契约、无 shell 直接 exec、结果整形、退出码和“不落状态”边界；修改行为时同步核对 `CUSTOM_CHECK_*` 常量与 `tests/test_custom_checks.py`。
 - [文件与存储](guidance/situations/files-storage.md)：对象身份、覆盖与变化判定，目录说明、冷资料保护、回收方式与容量收益。
 - [中断与恢复](guidance/situations/recovery.md)：状态结构校验、初始化回滚、维护中断与恢复证据。
 
