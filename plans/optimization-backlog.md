@@ -24,7 +24,7 @@
    - 每条样本重复解码同一 run 的 policy/evidence。
    - 预期：大窗口查询减少重复 JSON decode。
    - 风险：低；缓存生命周期限于一次查询。
-   - 状态：待评估。
+   - 状态：已试并回退。K6 15 条样本、输出预算只保留 1 条时查询 2.92ms → 2.84ms，落在噪声范围；收益不足，不留缓存复杂度。
 
 4. **steward 事件状态判定重复**（`tools/steward.py:238-316`）
    - `event_gap`、`degrade_event_clues`、`event_rebuild_gap` 条件重叠。
