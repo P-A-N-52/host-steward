@@ -1,13 +1,12 @@
 """本机约定授权的自定义检查：无 shell、有预算地执行并整形结果。"""
 
-import json
 import os
 import stat
 import time
 
 from observe import CommandFailedError, CommandOutputError, command
 from policy import custom_checks
-from state_io import StewardError
+from state_io import StewardError, decode
 
 
 def _executable_available(path):
@@ -33,8 +32,8 @@ def _shape_output(text, limit):
     parsed = None
     if not truncated:
         try:
-            parsed = json.loads(text)
-        except (ValueError, RecursionError):
+            parsed = decode(text)
+        except (ValueError, TypeError, RecursionError):
             parsed = None
     if isinstance(parsed, (dict, list)):
         return {"format": "json", "data": parsed, "output_bytes": total,

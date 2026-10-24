@@ -90,6 +90,14 @@ class CustomCheckTests(unittest.TestCase):
         self.assertEqual(result["format"], "text")
         self.assertEqual(result["output"], "hello\n")
 
+    def test_non_finite_json_falls_back_to_text(self):
+        command = self.script("nan", "print('{\"value\": NaN}')\n")
+        policy = self.policy([{"name": "nan", "command": command, "purpose": "非有限数字"}])
+        result = check_report(policy, self.state, LIMITS, name="nan")["checks"][0]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["format"], "text")
+        self.assertIn("NaN", result["output"])
+
     def test_nonzero_exit_is_reported_as_failed_with_output(self):
         command = self.script("fail", "import sys\nprint('needs attention')\nsys.exit(4)\n")
         policy = self.policy([{"name": "fail", "command": command, "purpose": "失败输出"}])
