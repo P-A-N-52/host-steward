@@ -363,7 +363,7 @@ class StewardTests(unittest.TestCase):
                 "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
                 "services": {"available": True, "items": []}}
         with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": True}), \
-             patch("steward.scan", return_value={}):
+             patch("steward.scan", return_value=({}, {})):
             patrol(self.store, self.policy)
         current = self.store.read("current.json")
         self.assertEqual(current["extension"], {"keep": True})
@@ -511,7 +511,7 @@ class StewardTests(unittest.TestCase):
                 "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
                 "services": {"available": True, "items": []}}
         with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": True}), \
-             patch("steward.scan", return_value={}) as scanner:
+             patch("steward.scan", return_value=({}, {})) as scanner:
             patrol(self.store, self.policy)
         self.assertEqual(scanner.call_args.args[1]["scan_entries"], 1234)
         self.assertEqual(self.store.limits["scan_entries"], 1234)
@@ -529,7 +529,7 @@ class StewardTests(unittest.TestCase):
             changed = copy.deepcopy(self.policy)
             changed["purpose"] = "changed during scan"
             self.store.write("host.json", changed)
-            return {}
+            return {}, {}
 
         with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": True}), \
              patch("steward.scan", side_effect=changing_scan):

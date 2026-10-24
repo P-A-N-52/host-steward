@@ -468,13 +468,8 @@ def patrol(store, policy, discard_scan_progress=False, discard_event_recheck=Fal
             for root, device in events.get("devices", {}).items():
                 if device is None:
                     observation_gaps.append({"kind": "events", "root": root, "reason": "root_unavailable"})
-        scanned = scan(previous.get("scan_progress"), policy["limits"], policy["roots"],
-                       policy.get("exclude_names", ()), str(store.path), recheck_targets)
-        if isinstance(scanned, tuple):
-            snapshots, scan_progress = scanned
-        else:
-            # 测试替身或旧扫描实现只返回快照映射时，保留上一轮续扫进度。
-            snapshots, scan_progress = scanned or {}, previous.get("scan_progress") or {}
+        snapshots, scan_progress = scan(previous.get("scan_progress"), policy["limits"], policy["roots"],
+                                        policy.get("exclude_names", ()), str(store.path), recheck_targets)
         events = finalize_events(events, previous, snapshots, roots)
         event_recheck = degrade_event_clues(event_recheck, events, now, previous.get("events"))
         consume_recheck(event_recheck, snapshots)
