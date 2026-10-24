@@ -36,7 +36,12 @@
    - 预期：减少产品代码；可能削弱独立对照测试。
    - 状态：暂缓，先确认测试价值。
 
-6. **输出别名重复**（`last_append`、`run/latest_run`、计数三份）
+6. **steward 扫描返回值兼容分支**（`tools/steward.py:471-477`）
+   - `scan` 只转发 `resumable_scan`，后者所有返回路径都是 `(快照, 进度)`；patrol 里的 `isinstance(scanned, tuple)` 回退只服务返回 dict 的测试替身，并顺带沿用上一轮进度。
+   - 预期：删 4 行生产分支与注释，3 处测试替身改为返回 `({}, {})`；正式 CLI 行为不变。
+   - 状态：待试。
+
+7. **输出别名重复**（`last_append`、`run/latest_run`、计数三份）
    - 只影响 JSON 长度，收益低。
    - 状态：不做。
 
