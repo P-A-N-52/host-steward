@@ -27,9 +27,9 @@
    - 状态：已试并回退。K6 15 条样本、输出预算只保留 1 条时查询 2.92ms → 2.84ms，落在噪声范围；收益不足，不留缓存复杂度。
 
 4. **steward 事件状态判定重复**（`tools/steward.py:238-316`）
-   - `event_gap`、`degrade_event_clues`、`event_rebuild_gap` 条件重叠。
-   - 预期：代码更短；但会改变 gap 组合输出，风险中。
-   - 状态：暂缓，等有明确测试口径。
+   - 已做：抽出 `_event_reason` 供 `event_gap` 与 `degrade_event_clues` 共用；保留 `unavailable → history_invalid` 与降级路径中 `unavailable → baseline` 的原有优先级，`event_rebuild_gap` 不动。
+   - 验证：128 种状态组合（来源、可用性、历史失效、游标待定、历史完整、基线、旧游标）新旧判定逐项一致；本地 480 项与 K6 480 项回归无新增失败；临时状态实机巡检两次，缺口与降级队列均为空。
+   - 状态：已做。
 
 5. **测试专用生产分支**（`files.scan`、`policy.root_rule`、metadata 探测）
    - 生产不走的代码保留在 tools，增加维护面。
