@@ -1,12 +1,11 @@
 """资源历史的有界摘要、连续性解释与输出分页。"""
 
-import copy
 import math
 import time
 
 from resource_changes import resource_changes
 from sample_store import SampleStore
-from state_io import StewardError, encode
+from state_io import StewardError, decode, encode
 
 
 DEFAULT_HISTORY_LIMIT = 41
@@ -700,7 +699,8 @@ def _compact_sample_changes(result):
 def fit_history_output(report, byte_limit):
     if type(byte_limit) is not int or byte_limit <= 0:
         raise StewardError("输出预算必须为正整数")
-    result = copy.deepcopy(report)
+    # 报告本身是 JSON 值；一次编码往返比递归 deepcopy 更快，也留下独立副本。
+    result = decode(encode(report))
     evaluated = len(report.get("samples") or [])
     if "evaluated_sample_count" not in result:
         result["evaluated_sample_count"] = evaluated
