@@ -54,7 +54,7 @@
 
 其他勘察候选：
 - `steward.py` 目录索引查找与旧行过滤：已做。预建 `rules_by_path` 并按 root 预分组旧 `directory_index`；5000 目录 + 5000 旧行 + 20 条规则由 5.4-6.1ms 降至 2.5-2.8ms；500 组随机快照对比输出一致，本地 480 项与 K6 回归无新增失败。
-- `files.excluded_by_path`（`tools/files.py:106-116`）：每条目重复 `Path(value).parts`，可每轮预计算排除前缀；仅配置 `exclude_paths` 时有收益。待试。
+- `files.excluded_by_path`（`tools/files.py:106-116`）：已做。利用排除项已校验为规范相对路径，直接用 `relative == value` 或 `relative.startswith(value + os.sep)` 匹配，去掉逐次 `Path(...).parts`；5000 路径 × 20 排除项由 181ms 降至 31ms。验证：15000 组随机路径/排除项新旧结果一致；本地 480 项与 K6 回归无新增失败；实机临时状态配置 `exclude_paths=["skip","a/b"]` 后扫描未计入被排除内容。
 - `observe.parse_processes`（`tools/observe.py:95-98`）：每条 resident 规则重复 basename、字段拼接两次；绝对收益仅几毫秒/轮。待试。
 
 ## 约束
