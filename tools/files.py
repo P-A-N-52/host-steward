@@ -108,10 +108,8 @@ def excluded_by_path(path, root, exclude_paths):
     relative = os.path.relpath(path, root)
     if relative == os.curdir:
         return False
-    parts = Path(relative).parts
     for value in exclude_paths:
-        prefix = Path(value).parts
-        if prefix and parts[:len(prefix)] == prefix:
+        if relative == value or relative.startswith(value + os.sep):
             return True
     return False
 
