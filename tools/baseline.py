@@ -620,7 +620,7 @@ def _derive_directories(records, allocated, root, max_depth):
         record = records[path]
         if path == root:
             continue
-        parent = str(Path(path).parent)
+        parent, name = os.path.split(path)
         summary = directories.get(parent)
         if summary is None:
             continue
@@ -636,7 +636,7 @@ def _derive_directories(records, allocated, root, max_depth):
             seen_data.add(record["id"])
             summary["bytes"] += record["size"]
             summary["allocated_bytes"] += allocated.get(path, 0)
-        if Path(path).name == "AGENTS.md":
+        if name == "AGENTS.md":
             summary["agents"] = path
     for path in sorted(directories, key=lambda value: value.count(os.sep), reverse=True):
         parent = str(Path(path).parent)
