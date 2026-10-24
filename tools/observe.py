@@ -92,10 +92,13 @@ def parse_processes(text, residents):
         pid, parent = int(parts[0]), int(parts[1])
         cpu, rss = float(parts[7]), int(parts[8]) * 1024
         executable = parts[9]
-        matched = next((rule for rule in residents if rule["executable"] in [executable, Path(executable).name]), None)
-        rows.append({"pid": pid, "parent_pid": parent, "started": " ".join(parts[2:7]),
+        name = os.path.basename(executable)
+        started = " ".join(parts[2:7])
+        matched = next((rule for rule in residents
+                        if rule["executable"] == executable or rule["executable"] == name), None)
+        rows.append({"pid": pid, "parent_pid": parent, "started": started,
                      "executable": executable, "cpu_percent": cpu, "rss_bytes": rss,
-                     "identity": f"{pid}:{' '.join(parts[2:7])}:{executable}",
+                     "identity": f"{pid}:{started}:{executable}",
                      "protection": matched["reason"] if matched else "unknown; observation only"})
     if not rows:
         raise ValueError("ps 未返回进程行")
