@@ -16,8 +16,8 @@
 
 2. **resource_query 多段输出裁剪重复编码**（`tools/resource_query.py:549-771`）
    - 样本裁剪已从逐条 pop 改为二分保留条数；`detail/boundary/source/gap` 前置压缩段暂未动。
-   - 测量：120 样本、32/64/128KB 预算，`fit_history_output` 685.6ms → 142.1ms（二分裁剪）→ 131.1ms（入口 deepcopy 改为编码往返）；样本裁剪段 121.9ms → 5.6ms；216 组真实报告 + 4735 组合成用例输出逐字节一致。
-   - 状态：已做；前置压缩仍可继续优化。
+   - 测量：120 样本、32/64/128KB 预算，`fit_history_output` 685.6ms → 142.1ms（二分裁剪）→ 131.1ms（入口编码往返）→ 66.5ms（跳过无变化/空列表的整份编码）；样本裁剪段 121.9ms → 5.6ms；216 组真实报告 + 4735 组合成用例 + 100 组随机输入输出逐字节一致。
+   - 状态：已做；剩余主要是必要编码与二分候选编码。
 
 3. **sample_store 按 run 缓存解码**（`tools/sample_store.py:624-625`）
    - 每条样本重复解码同一 run 的 policy/evidence。

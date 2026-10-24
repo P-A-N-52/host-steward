@@ -710,35 +710,47 @@ def fit_history_output(report, byte_limit):
         return result
     result["output_trimmed"] = True
     result["output_sample_omitted"] = result.get("output_sample_omitted", 0)
-    if _compact_output_details(result):
+    details_changed = _compact_output_details(result)
+    if details_changed:
         result["output_detail_trimmed"] = True
-    if len(encode(result)) > byte_limit:
-        _compact_for_output(result)
-    if len(encode(result)) > byte_limit:
-        _compact_sample_changes(result)
-    if len(encode(result)) > byte_limit:
-        latest = result.get("latest_processes")
-        if isinstance(latest, dict) and isinstance(latest.get("processes"), list):
-            original_processes = len(latest["processes"])
-            while len(encode(result)) > byte_limit and latest["processes"]:
-                latest["processes"].pop()
-            if len(latest["processes"]) < original_processes:
-                latest["output_omitted"] = original_processes - len(latest["processes"])
-                latest["output_truncated"] = True
-    if len(encode(result)) > byte_limit:
-        original_gaps = len(result.get("gaps") or [])
+        size_exceeds = len(encode(result)) > byte_limit
+    else:
+        size_exceeds = True
+    if size_exceeds:
+        output_changed = _compact_for_output(result)
+        if output_changed:
+            size_exceeds = len(encode(result)) > byte_limit
+    if size_exceeds:
+        output_changed = _compact_sample_changes(result)
+        if output_changed:
+            size_exceeds = len(encode(result)) > byte_limit
+    latest = result.get("latest_processes")
+    if size_exceeds and isinstance(latest, dict) and isinstance(latest.get("processes"), list) \
+            and latest["processes"]:
+        original_processes = len(latest["processes"])
+        while len(encode(result)) > byte_limit and latest["processes"]:
+            latest["processes"].pop()
+        if len(latest["processes"]) < original_processes:
+            latest["output_omitted"] = original_processes - len(latest["processes"])
+            latest["output_truncated"] = True
+        size_exceeds = len(encode(result)) > byte_limit
+    if size_exceeds and result.get("gaps"):
+        original_gaps = len(result["gaps"])
         while len(encode(result)) > byte_limit and result.get("gaps"):
             result["gaps"].pop()
-        if isinstance(result.get("gaps"), list) and len(result["gaps"]) < original_gaps:
+        if len(result["gaps"]) < original_gaps:
             result["output_gap_omitted"] = original_gaps - len(result["gaps"])
-    if len(encode(result)) > byte_limit:
-        original_sources = len(result.get("sources") or {})
+        size_exceeds = len(encode(result)) > byte_limit
+    if size_exceeds and result.get("sources"):
+        original_sources = len(result["sources"])
         while len(encode(result)) > byte_limit and result.get("sources"):
             result["sources"].pop(next(reversed(result["sources"])))
-        if isinstance(result.get("sources"), dict) and len(result["sources"]) < original_sources:
+        if len(result["sources"]) < original_sources:
             result["output_source_omitted"] = original_sources - len(result["sources"])
-    if len(encode(result)) > byte_limit:
-        _compact_boundary_change(result)
+        size_exceeds = len(encode(result)) > byte_limit
+    if size_exceeds:
+        if _compact_boundary_change(result):
+            size_exceeds = len(encode(result)) > byte_limit
     def _apply_sample_trim(target):
         samples = target.get("samples") or []
         target["truncated"] = True
@@ -774,7 +786,7 @@ def fit_history_output(report, byte_limit):
         _apply_sample_trim(candidate)
         return candidate
 
-    fits = len(encode(result)) <= byte_limit
+    fits = not size_exceeds
     if fits:
         if sample_omitted:
             result = _trimmed_candidate(sample_count, popped=False)
