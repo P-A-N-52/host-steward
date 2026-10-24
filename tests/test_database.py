@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from pathlib import Path
@@ -61,6 +62,18 @@ class DatabaseTest(unittest.TestCase):
         }
         self.store.write("current.json", value)
         self.assertEqual(self.store.read("current.json"), value)
+
+    def test_read_preserves_section_order_and_field_selection(self):
+        value = {"z": 0, "a": 1,
+                 "baselines": {"/z": {"complete": False}, "/a": {"complete": False}}, "middle": 2}
+        self.store.write("current.json", value)
+
+        loaded = self.store.read("current.json")
+        self.assertEqual(list(loaded), list(value))
+        self.assertEqual(list(loaded["baselines"]), list(value["baselines"]))
+        selected = self.store.read("current.json", fields=("a", "baselines"))
+        self.assertEqual(list(selected), ["a", "baselines"])
+        self.assertEqual(selected, {"a": 1, "baselines": value["baselines"]})
 
     def test_cross_process_read(self):
         self.store.write("current.json", {"value": [1, 2, 3]})
@@ -146,6 +159,105 @@ class DatabaseTest(unittest.TestCase):
         changed["baselines"]["/root-2"]["records"][changed_path] = {"size": 999999}
         store.write("current.json", changed)
         self.assertEqual(store.read("current.json"), changed)
+
+    def test_scan_progress_is_partitioned_and_round_trips(self):
+        root = "/workspace/root"
+        entry = {
+            "root_id": "16777234:42",
+            "scope": {"version": 2, "root": root, "device": 16777234,
+                      "exclude_names": [".git"], "state_path": "/state", "volume_policy": "root_device_only",
+                      "max_depth": 8, "exclude_paths": [], "other_volumes": {
+                          "count": 0, "digest": "0" * 64, "samples": [], "truncated": False}},
+            "records": {f"{root}/dir/file-{index}.txt": {
+                "id": f"16777234:{index}", "kind": "file", "size": index,
+                "mtime": 1792377000123456789, "birth": 1792300000.5} for index in range(20)},
+            "allocated": {f"{root}/dir/file-{index}.txt": index * 512 for index in range(20)},
+            "queue": [{"path": f"{root}/dir", "depth": 1, "cursor": "file-9.txt",
+                       "dir_id": {"id": "16777234:7", "mtime": 1792377000123456789}, "restarts": 1}],
+            "excluded": {"configured": 2},
+            "excluded_by_dir": {root: {"configured": 2}, f"{root}/dir": {"other_volume": 1}},
+            "boundaries": [[f"{root}/mount", 42]],
+            "rounds": 3,
+            "entries": 22,
+            "gaps": ["扫描达到时间或条目预算，本轮结果不用于判断删除"],
+            "vanished": [f"{root}/gone"],
+        }
+        value = {"version": 1, "before": True, "scan_progress": {root: entry, "next_index": 0},
+                 "after": False}
+        self.store.write("current.json", value)
+        self.assertEqual(self.store.read("current.json"), value)
+        selected = self.store.read("current.json", fields=("scan_progress",))
+        self.assertEqual(selected, {"scan_progress": value["scan_progress"]})
+
+        connection = sqlite3.connect(self.store.database_path)
+        try:
+            sections = [row[0] for row in connection.execute(
+                "SELECT section FROM sections WHERE dataset='current.json' ORDER BY ordinal")]
+            progress_rows = connection.execute(
+                "SELECT section, item_key FROM rows WHERE dataset='current.json' "
+                "AND section LIKE '[\"scan_progress\"%' ORDER BY section, item_key").fetchall()
+        finally:
+            connection.close()
+        self.assertIn('["scan_progress"]', sections)
+        for child in ["snapshot", "records", "allocated", "excluded_by_dir"]:
+            self.assertIn(json.dumps(["scan_progress", root, child], ensure_ascii=False, separators=(",", ":")), sections)
+        self.assertIn(('["scan_progress","/workspace/root","records"]',
+                       f"{root}/dir/file-0.txt"), progress_rows)
+        self.assertIn(('["scan_progress"]', "next_index"), progress_rows)
+        self.assertLess(sections.index('["scan_progress"]'),
+                        sections.index(json.dumps(["scan_progress", root, "snapshot"], ensure_ascii=False, separators=(",", ":"))))
+
+        changed = copy.deepcopy(value)
+        changed["scan_progress"] = {"next_index": 0}
+        self.store.write("current.json", changed)
+        self.assertEqual(self.store.read("current.json"), changed)
+        connection = sqlite3.connect(self.store.database_path)
+        try:
+            removed = connection.execute(
+                "SELECT COUNT(*) FROM sections WHERE dataset='current.json' "
+                "AND section LIKE '[\"scan_progress\",%'").fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(removed, 0)
+
+    def test_large_scan_progress_rows_stay_below_single_record_limit(self):
+        limits = {"file_bytes": 1024 * 1024, "total_bytes": 32 * 1024 * 1024}
+        store = Store(self.directory / "progress-rows", limits)
+        store.initialize_database()
+        root = "/workspace/root"
+        names = [f"{root}/目录组 {index // 60}/子目录 {index}/资料 {index:05d}.txt" for index in range(9000)]
+        entry = {
+            "root_id": "16777234:42",
+            "scope": {"version": 2, "root": root, "device": 16777234, "exclude_names": [],
+                      "state_path": "/state", "volume_policy": "root_device_only", "max_depth": 8,
+                      "exclude_paths": [], "other_volumes": {
+                          "count": 0, "digest": "0" * 64, "samples": [], "truncated": False}},
+            "records": {path: {"id": f"16777234:{index}", "kind": "file", "size": index,
+                               "mtime": 1792377000123456789, "birth": 1792300000.5}
+                        for index, path in enumerate(names)},
+            "allocated": {path: index * 512 for index, path in enumerate(names)},
+            "queue": [{"path": f"{root}/目录组 {index // 60}", "depth": 1, "cursor": None, "dir_id": None}
+                      for index in range(60)],
+            "excluded": {}, "excluded_by_dir": {}, "boundaries": [],
+            "rounds": 4, "entries": 9120, "gaps": [], "vanished": [],
+        }
+        value = {"version": 1, "scan_progress": {root: entry, "next_index": 0}}
+        store.write("current.json", value)
+        self.assertEqual(store.read("current.json"), value)
+        connection = sqlite3.connect(store.database_path)
+        try:
+            sections = [row[0] for row in connection.execute(
+                "SELECT section FROM sections WHERE dataset='current.json'")]
+            payloads = [row[0] for row in connection.execute(
+                "SELECT value_json FROM rows WHERE dataset='current.json'")]
+        finally:
+            connection.close()
+        self.assertIn(json.dumps(["scan_progress", root, "records"], ensure_ascii=False, separators=(",", ":")), sections)
+        largest = max(len(payload.encode("utf-8")) for payload in payloads)
+        self.assertLessEqual(largest, limits["file_bytes"])
+        self.assertGreater(len(json.dumps(entry["records"], ensure_ascii=False).encode("utf-8")),
+                           limits["file_bytes"])
+        self.assertEqual(len(store.read("current.json")["scan_progress"][root]["records"]), 9000)
 
     def test_single_record_limit_preserves_previous_state(self):
         limits = {"file_bytes": 256, "total_bytes": 4 * 1024 * 1024}

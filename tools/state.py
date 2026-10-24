@@ -2,87 +2,13 @@
 
 from contextlib import contextmanager
 import fcntl
-import json
-import math
 import os
 from pathlib import Path
 import stat
 import tempfile
 
-from database import (DATASET_NAMES, SIDECAR_SUFFIXES, Database, DatabaseError,
-                      writable_database_bytes)
-
-
-class StewardError(Exception):
-    pass
-
-
-class PolicyChangedError(StewardError):
-    pass
-
-
-def unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def finite_float(value):
-    result = float(value)
-    if not math.isfinite(result):
-        raise ValueError("non-finite JSON number")
-    return result
-
-
-def invalid_constant(value):
-    raise ValueError("non-finite JSON number")
-
-
-def decode(payload):
-    return json.loads(payload, object_pairs_hook=unique_object,
-                      parse_float=finite_float, parse_constant=invalid_constant)
-
-
-def encode(value):
-    return (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
-
-
-def _metadata(info):
-    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
-
-
-def read_regular_bytes(path, limit):
-    if type(limit) is not int or limit < 0:
-        raise StewardError("普通文件读取上限无效")
-    fd = os.open(os.fspath(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode):
-            raise StewardError("读取目标必须是普通文件")
-        if before.st_size > limit:
-            raise StewardError("文件超过读取上限")
-        remaining = limit + 1
-        chunks = []
-        while remaining:
-            chunk = os.read(fd, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        after = os.fstat(fd)
-        payload = b"".join(chunks)
-        if _metadata(before) != _metadata(after):
-            raise StewardError("文件在读取期间发生变化")
-        if len(payload) != after.st_size:
-            raise StewardError("文件未能完整读取")
-        if len(payload) > limit:
-            raise StewardError("文件超过读取上限")
-        return payload
-    finally:
-        os.close(fd)
+from database import DATASET_NAMES, SIDECAR_SUFFIXES, Database, writable_database_bytes
+from state_io import PolicyChangedError, StewardError, _metadata, decode, encode, read_regular_bytes
 
 
 class Store:
@@ -93,6 +19,7 @@ class Store:
         self.path = self.path.resolve()
         self.path.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.limits = limits
+        self.policy_evidence = None
         self._database_path = self.path / "steward.sqlite3"
 
     @property
@@ -112,22 +39,13 @@ class Store:
 
     @staticmethod
     def empty_database_bytes():
-        try:
-            return Database.empty_database_bytes()
-        except DatabaseError as exc:
-            raise StewardError(str(exc)) from exc
+        return Database.empty_database_bytes()
 
     def database_info(self):
-        try:
-            return self._database().info()
-        except DatabaseError as exc:
-            raise StewardError(str(exc)) from exc
+        return self._database().info()
 
     def check_database(self):
-        try:
-            self._database().check()
-        except DatabaseError as exc:
-            raise StewardError(str(exc)) from exc
+        self._database().check()
 
     def initialize_database(self, path=None):
         target = self._database_path if path is None else Path(path)
@@ -135,10 +53,7 @@ class Store:
             target = self.target(target)
         if target.parent != self.path:
             raise StewardError("SQLite 状态库必须位于状态目录内")
-        try:
-            Database.initialize(target)
-        except DatabaseError as exc:
-            raise StewardError(str(exc)) from exc
+        Database.initialize(target)
         self._database_path = target
 
     def _database(self):
@@ -151,8 +66,10 @@ class Store:
         total = path.stat().st_size
         for suffix in SIDECAR_SUFFIXES:
             sidecar = Path(str(path) + suffix)
-            if sidecar.exists():
+            try:
                 total += sidecar.stat().st_size
+            except FileNotFoundError:
+                pass
         return total
 
     def _database_outside(self, database):
@@ -185,9 +102,9 @@ class Store:
         return target
 
     @contextmanager
-    def lock(self):
+    def lock(self, name=".lock"):
         try:
-            fd = os.open(self.target(".lock"),
+            fd = os.open(self.target(name),
                          os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         except OSError as exc:
             raise StewardError("锁文件无法打开，必须是普通文件") from exc
@@ -198,24 +115,20 @@ class Store:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise StewardError("已有巡检或操作运行，本轮退出") from exc
+                message = "已有常驻采集运行，停止采集后再执行升级" if name == ".collector.lock" else "已有巡检或操作运行，本轮退出"
+                raise StewardError(message) from exc
             yield
         finally:
             os.close(fd)
 
-    def read(self, name, default=None):
+    def read(self, name, default=None, fields=None):
         if name in DATASET_NAMES:
-            try:
-                return self._database().read(name, default)
-            except DatabaseError as exc:
-                raise StewardError(str(exc)) from exc
+            return self._database().read(name, default, fields=fields)
         path = self.target(name)
         try:
             payload = read_regular_bytes(path, self.limits["file_bytes"])
         except FileNotFoundError:
             return default
-        except StewardError:
-            raise
         except OSError as exc:
             raise StewardError(f"状态损坏或无法读取，保留原文件：{name}") from exc
         try:
@@ -225,16 +138,21 @@ class Store:
 
     def usage(self):
         total = count = 0
-        for parent, directories, files in os.walk(self.path, followlinks=False):
-            for name in directories + files:
-                path = Path(parent) / name
-                if path.is_symlink():
-                    raise StewardError("状态区存在符号链接，停止写入")
-                count += 1
-                if count > 1024:
-                    raise StewardError("状态区对象数异常，停止写入")
-                if path.is_file():
-                    total += path.stat().st_size
+        pending = [self.path]
+        while pending:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    count += 1
+                    if stat.S_ISLNK(info.st_mode) or count > 1024:
+                        raise StewardError("状态区存在链接或对象数超限，停止写入")
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(entry.path)
+                    elif stat.S_ISREG(info.st_mode):
+                        total += info.st_size
         return total
 
     def check_capacity(self, new_bytes):
@@ -272,39 +190,17 @@ class Store:
 
     def write(self, name, value):
         if name in DATASET_NAMES:
-            payload_size = len(encode(value))
-            if payload_size > self.limits["total_bytes"]:
-                raise StewardError(f"动态状态超过总容量预算，保留上次状态：{name}")
-            try:
-                database = self._database()
-                outside = self._database_outside(database)
-                database.write(name, value, total_bytes=self.limits["total_bytes"],
-                               outside_bytes=outside)
-            except DatabaseError as exc:
-                raise StewardError(str(exc)) from exc
+            database = self._database()
+            database.write(name, value, total_bytes=self.limits["total_bytes"],
+                           outside_bytes=self._database_outside(database))
             return
         self.write_bytes(name, encode(value))
 
     def import_data(self, data, metadata=None):
-        if not isinstance(data, dict):
-            raise StewardError("导入数据必须是对象")
-        sizes = {name: len(encode(value)) for name, value in data.items()}
-        for name, size in sizes.items():
-            if name not in DATASET_NAMES:
-                raise StewardError(f"未知动态状态数据集：{name}")
-            if size > self.limits["total_bytes"]:
-                raise StewardError(f"动态状态超过总容量预算，保留上次状态：{name}")
-        try:
-            database = self._database()
-            outside = self._database_outside(database)
-            return database.import_data(data, metadata=metadata,
-                                        total_bytes=self.limits["total_bytes"],
-                                        outside_bytes=outside)
-        except DatabaseError as exc:
-            raise StewardError(str(exc)) from exc
+        database = self._database()
+        return database.import_data(data, metadata=metadata,
+                                    total_bytes=self.limits["total_bytes"],
+                                    outside_bytes=self._database_outside(database))
 
     def export_data(self, defaults=None):
-        try:
-            return self._database().export_data(defaults)
-        except DatabaseError as exc:
-            raise StewardError(str(exc)) from exc
+        return self._database().export_data(defaults)

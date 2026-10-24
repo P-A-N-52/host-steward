@@ -37,7 +37,7 @@ class StewardTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def snapshot(self, limits=None):
-        return scan([str(self.root)], limits or self.policy["limits"], state_path=str(self.store.path))
+        return scan(self.policy["roots"], limits or self.policy["limits"], state_path=str(self.store.path))
 
     def rule(self, directory, kind="temporary"):
         rule = {"path": str(directory), "purpose": "测试用途", "kind": kind, "allow_notes": True,
@@ -146,7 +146,8 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(row["added"] + row["removed"] + row["moved"], 0)
         self.assertTrue(row["continuity_gap"])
         self.assertTrue(row["samples"][0]["identity_changed"])
-        self.assertTrue(any("identity:" in reason for reason in delta["gaps"][0]["reasons"]))
+        self.assertEqual(delta["gaps"], [])
+        self.assertEqual(delta["comparison_gaps"], [])
 
     def test_nested_directory_replacements_only_emit_outer_directory(self):
         parent = self.root / "parent"
@@ -243,7 +244,8 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(delta["changes"][0]["path"], path)
         self.assertEqual(delta["changes"][0]["modified"], 1)
         self.assertEqual(delta["changes"][0]["removed"], 0)
-        self.assertTrue(delta["gaps"])
+        self.assertTrue(delta["changes"][0]["continuity_gap"])
+        self.assertEqual(delta["gaps"], [])
 
     def test_file_to_directory_is_one_replacement(self):
         path = self.root / "replace"
@@ -292,7 +294,8 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(sum(row["moved"] for row in delta["changes"]), 0)
         self.assertEqual(sum(row["added"] for row in delta["changes"]), 1)
         self.assertEqual(sum(row["removed"] for row in delta["changes"]), 1)
-        self.assertTrue(any("move uncertain" in reason for reason in delta["gaps"][0]["reasons"]))
+        self.assertEqual(delta["gaps"], [])
+        self.assertTrue(any("move uncertain" in reason for reason in delta["comparison_gaps"][0]["reasons"]))
 
     def test_replacement_byte_delta_is_not_growth_evidence(self):
         directory = self.root / "replace"
@@ -322,7 +325,8 @@ class StewardTests(unittest.TestCase):
         delta = compare(before, after)
         self.assertEqual(delta["new_baselines"], [root])
         self.assertEqual(delta["changes"], [])
-        self.assertTrue(any("identity: root changed" in reason for reason in delta["gaps"][0]["reasons"]))
+        self.assertEqual(delta["gaps"], [])
+        self.assertTrue(any("identity: root changed" in reason for reason in delta["comparison_gaps"][0]["reasons"]))
 
     def test_state_quota_keeps_old_file_and_no_temp(self):
         self.store.write("current.json", {"original": True})
@@ -374,6 +378,9 @@ class StewardTests(unittest.TestCase):
             ("changes", [{}]),
             ("samples", [{"time": 0, "processes": [{}]}]),
             ("directory_index", [{"root": "missing-path"}]),
+            ("comparison_gaps", {}),
+            ("comparison_gaps", [None]),
+            ("change_retention", []),
         ]
         for key, value in invalid:
             with self.subTest(key=key):
@@ -395,7 +402,7 @@ class StewardTests(unittest.TestCase):
                     decode(read_regular_bytes(target, 128))
                 self.assertEqual(target.read_text(), payload)
 
-    def test_large_timestamp_is_blocked_before_observation_without_traceback(self):
+    def test_large_timestamp_is_blocked_before_observation_with_traceback(self):
         from state_schema import read_current
         from steward import patrol
         payloads = [
@@ -415,9 +422,9 @@ class StewardTests(unittest.TestCase):
                 observation.assert_not_called()
                 result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "patrol", "--state", str(self.store.path)],
                                         capture_output=True, text=True, timeout=5)
-                self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertEqual(json.loads(result.stderr)["status"], "blocked")
-                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
                 self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
 
     def test_timestamp_guard_does_not_restrict_integer_file_metadata(self):
@@ -457,7 +464,7 @@ class StewardTests(unittest.TestCase):
         from steward import load
         target = self.store.target("host.json")
         original = target.read_text()
-        duplicate = original.replace('"version":1', '"version":1,"version":1', 1)
+        duplicate = original.replace(f'"version":{self.policy["version"]}', f'"version":{self.policy["version"]},"version":{self.policy["version"]}', 1)
         self.assertNotEqual(duplicate, original)
         target.write_text(duplicate)
         with self.assertRaises(StewardError):
@@ -479,13 +486,13 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(result["operation"]["status"], "restored")
         self.assertEqual(file.read_text(), "old but valid")
 
-    def test_cli_wrong_schema_returns_blocked_json_not_traceback(self):
+    def test_cli_wrong_schema_returns_traceback(self):
         self.store.write("current.json", {"version": 1, "baselines": []})
-        result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "status", "--state", str(self.store.path)],
+        result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "patrol", "--state", str(self.store.path)],
                                 capture_output=True, text=True)
-        self.assertEqual(result.returncode, 2)
-        self.assertEqual(json.loads(result.stderr)["status"], "blocked")
-        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Traceback", result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_patrol_lock_excludes_another_writer(self):
         other = Store(self.store.path, self.policy["limits"])
@@ -740,7 +747,7 @@ class StewardTests(unittest.TestCase):
         restore(self.store, self.policy, moved["id"], True)
         self.assertEqual(file.read_text(), "recover me")
 
-    def test_restore_allows_nonempty_operation_directory(self):
+    def test_restore_records_restored_before_nonempty_directory_cleanup_fails(self):
         self.rule(self.root)
         file = self.root / "temporary"
         file.write_text("recover me")
@@ -748,10 +755,8 @@ class StewardTests(unittest.TestCase):
         target = Path(moved["target"])
         extra = target.parent / "keep"
         extra.write_text("do not clean")
-        result = restore(self.store, self.policy, moved["id"], True)
-        self.assertEqual(result["operation"]["status"], "restored")
-        self.assertFalse(result["cleanup"]["removed"])
-        self.assertTrue(result["cleanup"]["reason"])
+        with self.assertRaises(OSError):
+            restore(self.store, self.policy, moved["id"], True)
         self.assertEqual(file.read_text(), "recover me")
         self.assertFalse(target.exists())
         self.assertEqual(extra.read_text(), "do not clean")
@@ -904,41 +909,54 @@ class StewardTests(unittest.TestCase):
     def test_macos_memory_failure_identifies_failed_source(self):
         from unittest.mock import patch
         from observe import observe
-        success = {"ok": True, "reason": None, "text": ""}
-        failure = {"ok": False, "reason": "command_failed", "text": ""}
+        process = "42 1 Fri Oct 16 10:00:00 2026 0.0 100 /usr/bin/example\n"
         for failed in ["vm_stat", "sysctl"]:
             with self.subTest(source=failed):
-                responses = {"vm_stat": dict(success, text="Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"),
-                             "sysctl": dict(success, text="8589934592\n")}
-                responses[failed] = failure
-                with patch("observe.platform.system", return_value="Darwin"), \
-                     patch("observe.command", side_effect=lambda arguments, *args: responses.get(arguments[0], success)):
-                    result = observe(self.policy)
-                self.assertFalse(result["memory"]["available"])
-                self.assertIn(failed, result["memory"]["reason"])
+                def response(arguments, *args):
+                    if arguments[0] == "ps":
+                        return process
+                    if arguments[0] == "vm_stat":
+                        if failed == "vm_stat":
+                            raise StewardError("vm_stat fixture failure")
+                        return self.VM_STAT_TEXT
+                    if arguments[:3] == ["sysctl", "-n", "kern.boottime"]:
+                        return "{ sec = 1791379437, usec = 417 }\n"
+                    if arguments[:3] == ["sysctl", "-n", "hw.memsize"]:
+                        if failed == "sysctl":
+                            raise StewardError("sysctl fixture failure")
+                        return "8589934592\n"
+                    raise AssertionError(arguments)
 
-    def test_macos_memory_does_not_accept_invalid_capacity_as_available(self):
+                with patch("observe.platform.system", return_value="Darwin"), \
+                     patch("observe.command", side_effect=response), \
+                     self.assertRaisesRegex(StewardError, failed):
+                    observe(self.policy)
+
+    def test_macos_memory_does_not_accept_invalid_capacity(self):
         from unittest.mock import patch
-        from observe import observe
+        from observe import observe_darwin_memory
         for value in ["", "unknown", "0"]:
             with self.subTest(capacity=value):
                 def response(arguments, *args):
-                    text = "page size of 16384 bytes" if arguments[0] == "vm_stat" else value if arguments[0] == "sysctl" else ""
-                    return {"ok": True, "reason": None, "text": text}
-                with patch("observe.platform.system", return_value="Darwin"), patch("observe.command", side_effect=response):
-                    result = observe(self.policy)
-                self.assertFalse(result["memory"]["available"])
-                self.assertTrue(result["memory"]["reason"])
+                    if arguments[0] == "vm_stat":
+                        return self.VM_STAT_TEXT
+                    if arguments[:3] == ["sysctl", "-n", "hw.memsize"]:
+                        return value
+                    if arguments[:3] == ["sysctl", "-n", "vm.swapusage"]:
+                        return "total = 2048.00M  used = 692.44M  free = 1355.56M\n"
+                    raise AssertionError(arguments)
+
+                with patch("observe.command", side_effect=response), self.assertRaises(ValueError):
+                    observe_darwin_memory(self.policy["limits"])
 
     def test_linux_memory_observation_uses_explicit_available_memory(self):
         from unittest.mock import patch
-        from observe import observe
-        with patch("observe.platform.system", return_value="Linux"), \
-             patch("observe.Path.read_text", return_value="MemTotal: 1000 kB\nMemAvailable: 250 kB\n"), \
-             patch("observe.command", return_value={"ok": True, "reason": None, "text": ""}):
-            result = observe(self.policy)
-        self.assertEqual(result["memory"]["total_bytes"], 1024000)
-        self.assertEqual(result["memory"]["available_bytes"], 256000)
+        from observe import observe_linux_memory
+        text = "MemTotal: 1000 kB\nMemAvailable: 250 kB\nSwapTotal: 1000 kB\nSwapFree: 500 kB\n"
+        with patch("observe.Path.read_text", return_value=text):
+            result = observe_linux_memory()
+        self.assertEqual(result["total_bytes"], 1024000)
+        self.assertEqual(result["available_bytes"], 256000)
 
     VM_STAT_TEXT = (
         "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
@@ -965,12 +983,14 @@ class StewardTests(unittest.TestCase):
     def test_swapusage_parses_sizes(self):
         parsed = parse_swapusage("total = 2048.00M  used = 692.44M  free = 1355.56M  (encrypted)")
         self.assertEqual(parsed, {"total_bytes": 2147483648, "used_bytes": 726075965, "free_bytes": 1421407682})
-        self.assertIsNone(parse_swapusage("vm.swapusage: unknown"))
-        self.assertIsNone(parse_swapusage("total = 2048.00M"))
+        for text in ("vm.swapusage: unknown", "total = 2048.00M"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_swapusage(text)
 
     def test_boottime_parses_seconds(self):
         self.assertEqual(parse_boottime("{ sec = 1791379437, usec = 417 } Wed Oct  7 21:23:57 2026"), 1791379437)
-        self.assertIsNone(parse_boottime(""))
+        with self.assertRaises(ValueError):
+            parse_boottime("")
 
     def test_battery_reports_source_and_batteries(self):
         laptop = parse_battery("Now drawing from 'Battery Power'\n"
@@ -979,7 +999,8 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(laptop["batteries"], [{"percent": 77, "status": "discharging", "remaining_minutes": 1200}])
         desktop = parse_battery("Now drawing from 'AC Power'\n")
         self.assertEqual(desktop, {"source": "AC Power", "batteries": []})
-        self.assertIsNone(parse_battery(""))
+        with self.assertRaises(ValueError):
+            parse_battery("")
 
     def test_thermal_notes_mean_no_warning(self):
         quiet = parse_thermal("Note: No thermal warning level has been recorded\n"
@@ -1034,7 +1055,8 @@ class StewardTests(unittest.TestCase):
                           "disks": [{"name": "disk0", "kb_per_transfer": 12.22,
                                      "transfers_per_second": 159.0, "mb_per_second": 1.90}],
                           "load_average": [1.57, 2.30, 2.70]})
-        self.assertIsNone(parse_iostat(""))
+        with self.assertRaises(ValueError):
+            parse_iostat("")
 
     def test_linux_proc_parsers(self):
         dev = parse_proc_net_dev(
@@ -1058,33 +1080,35 @@ class StewardTests(unittest.TestCase):
 
     def test_macos_observe_collects_new_sections(self):
         from observe import observe
-        success = {"ok": True, "reason": None, "text": ""}
         responses = {
-            ("sysctl", "-n", "hw.memsize"): dict(success, text="8589934592\n"),
-            ("sysctl", "-n", "kern.boottime"): dict(success, text="{ sec = 1791379437, usec = 417 } Wed Oct  7 21:23:57 2026\n"),
-            ("sysctl", "-n", "vm.swapusage"): dict(success, text="total = 2048.00M  used = 692.44M  free = 1355.56M  (encrypted)\n"),
-            ("vm_stat",): dict(success, text=self.VM_STAT_TEXT),
-            ("netstat", "-ib"): dict(success, text="Name  Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll\n"
-                                                    "en0 1500 <Link#4> a4:83:e7:12:34:56 123456 7 987654 654321 2 456789 0\n"),
-            ("netstat", "-an"): dict(success, text="tcp4 0 0 *.5000 *.* LISTEN\ntcp4 0 0 10.0.0.2.443 10.0.0.3.5 CLOSE_WAIT\n"),
-            ("ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOGPU"): dict(
-                success, text='"PerformanceStatistics" = {"Device Utilization %"=62,"Renderer Utilization %"=62,'
-                              '"Tiler Utilization %"=62,"Alloc system memory"=1671708672,"In use system memory"=649166848}'),
-            ("pmset", "-g", "batt"): dict(success, text="Now drawing from 'Battery Power'\n"
-                                                        " -InternalBattery-0\t77%; discharging; 20:00 remaining present: true\n"),
-            ("pmset", "-g", "therm"): dict(success, text="Note: No thermal warning level has been recorded\n"),
-            ("iostat", "-c", "2"): dict(success, text="              disk0       cpu    load average\n"
-                                                      "    KB/t  tps  MB/s  us sy id   1m   5m   15m\n"
-                                                      "   28.79   60  1.68   8  5 87  1.71 2.34 2.71\n"
-                                                      "   12.22  159  1.90   7  5 88  1.57 2.30 2.70\n"),
+            ("ps", "-axo", "pid=,ppid=,lstart=,pcpu=,rss=,comm="):
+                "42 1 Fri Oct 16 10:00:00 2026 0.0 100 /usr/bin/example\n",
+            ("launchctl", "list"): "PID\tStatus\tLabel\n1\t0\tcom.example\n",
+            ("sysctl", "-n", "hw.memsize"): "8589934592\n",
+            ("sysctl", "-n", "kern.boottime"): "{ sec = 1791379437, usec = 417 } Wed Oct  7 21:23:57 2026\n",
+            ("sysctl", "-n", "vm.swapusage"): "total = 2048.00M  used = 692.44M  free = 1355.56M  (encrypted)\n",
+            ("vm_stat",): self.VM_STAT_TEXT,
+            ("netstat", "-ib"): "Name  Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll\n"
+                                "en0 1500 <Link#4> a4:83:e7:12:34:56 123456 7 987654 654321 2 456789 0\n",
+            ("netstat", "-an"): "tcp4 0 0 *.5000 *.* LISTEN\ntcp4 0 0 10.0.0.2.443 10.0.0.3.5 CLOSE_WAIT\n",
+            ("ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOGPU"):
+                '"PerformanceStatistics" = {"Device Utilization %"=62,"Renderer Utilization %"=62,'
+                '"Tiler Utilization %"=62,"Alloc system memory"=1671708672,"In use system memory"=649166848}',
+            ("pmset", "-g", "batt"): "Now drawing from 'Battery Power'\n"
+                                     " -InternalBattery-0\t77%; discharging; 20:00 remaining present: true\n",
+            ("pmset", "-g", "therm"): "Note: No thermal warning level has been recorded\n",
+            ("iostat", "-c", "2"): "              disk0       cpu    load average\n"
+                                   "    KB/t  tps  MB/s  us sy id   1m   5m   15m\n"
+                                   "   28.79   60  1.68   8  5 87  1.71 2.34 2.71\n"
+                                   "   12.22  159  1.90   7  5 88  1.57 2.30 2.70\n",
         }
 
         def response(arguments, *args):
-            if tuple(arguments) in responses:
-                return responses[tuple(arguments)]
-            return responses.get((arguments[0],), success)
+            return responses[tuple(arguments)]
 
-        with patch("observe.platform.system", return_value="Darwin"), patch("observe.command", side_effect=response):
+        with patch("observe.platform.system", return_value="Darwin"), \
+             patch("observe.platform.machine", return_value="arm64"), \
+             patch("observe.command", side_effect=response):
             result = observe(self.policy)
         self.assertEqual(result["boot"], {"available": True, "unix_time": 1791379437, "reason": None})
         self.assertTrue(result["memory"]["available"])
@@ -1111,29 +1135,20 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(facts["power"]["source"], "Battery Power")
         self.assertEqual(facts["gpu"]["allocated_bytes"], 1671708672)
 
-    def test_macos_observe_new_sections_fail_soft(self):
+    def test_macos_observe_parse_failure_is_not_fail_soft(self):
         from observe import observe
-        success = {"ok": True, "reason": None, "text": ""}
-        responses = {"vm_stat": dict(success, text="Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"),
-                     "sysctl": dict(success, text="8589934592\n")}
 
         def response(arguments, *args):
-            return responses.get(arguments[0], success)
+            if arguments[0] == "ps":
+                return "42 1 Fri Oct 16 10:00:00 2026 0.0 100 /usr/bin/example\n"
+            if arguments[:3] == ["sysctl", "-n", "kern.boottime"]:
+                return "unparseable boot time\n"
+            raise AssertionError(arguments)
 
-        with patch("observe.platform.system", return_value="Darwin"), patch("observe.command", side_effect=response):
-            result = observe(self.policy)
-        self.assertTrue(result["memory"]["available"])
-        self.assertFalse(result["memory"]["swap"]["available"])
-        for section in ["boot", "gpu", "power"]:
-            self.assertFalse(result[section]["available"], section)
-            self.assertTrue(result[section]["reason"])
-        self.assertFalse(result["network"]["interfaces"]["available"])
-        self.assertEqual(result["network"]["tcp_states"]["states"], {})
-        self.assertFalse(result["cpu"]["utilization"]["available"])
-        self.assertFalse(result["diskio"]["available"])
-        facts = sample_facts(result)
-        self.assertEqual(sorted(facts), ["cpu"])
-        self.assertIn("load_average", facts["cpu"])
+        with patch("observe.platform.system", return_value="Darwin"), \
+             patch("observe.command", side_effect=response), \
+             self.assertRaisesRegex(ValueError, "kern.boottime"):
+            observe(self.policy)
 
     def test_linux_observe_collects_counters_and_network(self):
         from observe import observe
@@ -1148,18 +1163,27 @@ class StewardTests(unittest.TestCase):
         }
 
         class FakePath(str):
-            def read_text(self):
-                return texts.get(str(self), texts["/proc/meminfo"])
+            @property
+            def name(self):
+                return str(self).rstrip("/").rsplit("/", 1)[-1]
 
-            def exists(self):
-                return str(self) in texts
+            def read_text(self):
+                if str(self) in texts:
+                    return texts[str(self)]
+                raise FileNotFoundError(str(self))
 
             def iterdir(self):
-                raise OSError("测试环境没有 /sys")
+                raise FileNotFoundError("测试环境没有 /sys")
+
+        def response(arguments, *args):
+            if arguments[0] == "ps":
+                return "42 1 Fri Oct 16 10:00:00 2026 0.0 100 /usr/bin/example\n"
+            if arguments[0] == "systemctl":
+                return "example.service\n"
+            raise AssertionError(arguments)
 
         with patch("observe.platform.system", return_value="Linux"), \
-             patch("observe.Path", FakePath), \
-             patch("observe.command", return_value={"ok": True, "reason": None, "text": ""}):
+             patch("observe.Path", FakePath), patch("observe.command", side_effect=response):
             result = observe(self.policy)
         self.assertTrue(result["memory"]["available"])
         self.assertEqual(result["memory"]["counters"]["AnonPages"], 2000000 * 1024)
@@ -1290,31 +1314,28 @@ class StewardTests(unittest.TestCase):
         self.assertTrue(result["history_invalid"])
         self.assertIsNone(event_since({"events": result}, devices))
 
-    def test_event_retry_limit_forces_rebaseline(self):
+    def test_event_unavailable_preserves_cursor_for_later_retry(self):
         from steward import event_since, finalize_events
         root = str(self.root)
         devices = {root: 1}
         previous = {"events": {"devices": devices, "cursor": 10, "history_invalid": False, "retry_count": 2}}
         candidate = {"source": "macos_fsevents", "available": False, "baseline": False, "devices": devices}
         result = finalize_events(candidate, previous, {root: {"complete": True}}, [root])
-        self.assertEqual(result["retry_count"], 3)
-        self.assertTrue(result["history_invalid"])
-        self.assertIsNone(result["cursor"])
-        self.assertIsNone(event_since({"events": result}, devices))
+        self.assertNotIn("retry_count", result)
+        self.assertFalse(result["history_invalid"])
+        self.assertEqual(result["cursor"], 10)
+        self.assertTrue(result["cursor_pending"])
+        self.assertEqual(event_since({"events": result}, devices), 10)
 
     def test_native_events_rejects_non_object_json_and_malformed_previous(self):
         from unittest.mock import patch
-        from steward import event_since, finalize_events, native_events
-        root = str(self.root)
-        devices = {root: os.stat(root).st_dev}
+        from steward import event_since, native_events
+        devices = {str(self.root): os.stat(self.root).st_dev}
         self.assertIsNone(event_since({"events": []}, devices))
         previous = {"events": {"devices": devices, "cursor": 10, "history_invalid": False}}
-        with patch("steward.sys.platform", "darwin"), \
-             patch("steward.command", return_value={"ok": True, "reason": None, "text": "[]"}):
-            candidate = native_events(self.policy, previous)
-        self.assertFalse(candidate["available"])
-        result = finalize_events(candidate, previous, {root: {"complete": True}}, [root])
-        self.assertEqual(result["cursor"], 10)
+        with patch("steward.sys.platform", "darwin"), patch("steward.command", return_value="[]"), \
+             self.assertRaisesRegex(ValueError, "必须是对象"):
+            native_events(self.policy, previous)
 
     def test_macos_event_gap_is_reported_once_and_recovery_is_visible(self):
         from unittest.mock import patch
@@ -1384,11 +1405,10 @@ class StewardTests(unittest.TestCase):
         self.assertEqual((self.base / "outside").read_text(), "keep")
 
     def test_subprocess_output_and_time_are_bounded(self):
-        result = command([sys.executable, "-c", "print('x'*100000)"], max_bytes=128)
-        self.assertFalse(result["ok"])
-        self.assertLessEqual(len(result["text"]), 128)
-        result = command([sys.executable, "-c", "import time;time.sleep(10)"], timeout=0.1)
-        self.assertEqual(result["reason"], "command_timeout")
+        with self.assertRaisesRegex(StewardError, "输出超过 128 字节"):
+            command([sys.executable, "-c", "print('x'*100000)"], max_bytes=128)
+        with self.assertRaisesRegex(TimeoutError, "超过 0.1 秒"):
+            command([sys.executable, "-c", "import time;time.sleep(10)"], timeout=0.1)
 
     def test_process_identity_changes_after_restart(self):
         text = "10 1 Fri Oct 16 10:00:00 2026 2.0 100 /usr/bin/app\n10 1 Fri Oct 16 10:01:00 2026 2.0 100 /usr/bin/app\n"
@@ -1584,6 +1604,7 @@ class StewardTests(unittest.TestCase):
         self.assertTrue(known["stale"])
         self.assertFalse(known["complete"])
         self.assertTrue(current["coverage_gaps"])
+        self.assertEqual(current["comparison_gaps"], [])
 
     def test_loss_of_host_observation_is_reported_once(self):
         from unittest.mock import patch

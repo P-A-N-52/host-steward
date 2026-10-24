@@ -77,14 +77,17 @@ class SafetyTests(unittest.TestCase):
     def test_read_rejects_metadata_change_during_read(self):
         path = self.base / "changing"
         path.write_bytes(b"before")
-        original_read = os.read
+        original_fstat = os.fstat
+        calls = 0
 
-        def read_then_change(fd, amount):
-            payload = original_read(fd, amount)
-            path.write_bytes(b"after and changed")
-            return payload
+        def change_before_final_stat(fd):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                path.write_bytes(b"after and changed")
+            return original_fstat(fd)
 
-        with patch("state.os.read", side_effect=read_then_change):
+        with patch("state_io.os.fstat", side_effect=change_before_final_stat):
             with self.assertRaises(StewardError):
                 read_regular_bytes(path, 128)
 

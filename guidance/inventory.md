@@ -10,7 +10,7 @@ python3 /skill目录/tools/steward.py inventory --state /本机状态 --path /�
 python3 /skill目录/tools/steward.py inspect --state /本机状态 --id 资源编号
 ```
 
-按 skill 目录中的 `state/resource.example.json` 填写资源定义，再用 `inventory --state /本机状态 --record /资源定义.json` 登记。每份定义最多 8 KiB，档案最多 128 项，容量不足时保留原档案并拒绝写入。
+按 skill 目录中的 `state/resource.example.json` 填写资源定义，再用 `inventory --state /本机状态 --record /资源定义.json` 登记。每份定义最多 8 KiB，档案总量受本机状态预算控制，容量不足时保留原档案并拒绝写入。
 
 数据库的 inventory 数据集按 id 保存当前定义和一份最新调查。相同 id 的新定义替换旧定义，同时清空调查与身份基准；完全相同的定义返回 `unchanged`。登记后的第一次成功调查建立新基准。新数据库尚无档案时按空档案查询，首次登记时写入；旧 JSON 状态需先按[接管指导](setup.md#旧状态迁移与导出)迁移。
 
@@ -46,10 +46,14 @@ python3 /skill目录/tools/steward.py inspect --state /本机状态 --service sy
 
 `inspect --id` 将最新调查保存到已登记条目。直接按 path 或 service 调查只返回输出（`recording.saved=false`），需要保留时先登记资源，再按 id 调查。文件目标限于 `host.json.roots` 内的规范路径；服务调查的管理器、进程、端点与功能验证范围见 [services](situations/services.md)。
 
-引用搜索在 roots 内选定的文本后缀中，按路径或服务名字面匹配，返回文件位置与类型：configuration / source / documentation / self_definition。`AGENTS.md` 仅定位；搜索跳过符号链接、其他卷、排除项和状态目录。大文件、权限、深度、预算和各根覆盖缺口随结果返回，引用内容留在原文件中。
+范围内目标的 `lstat` 明确返回文件不存在时，调查记录 `target_errno_2` 缺口，身份和元数据连续性为 `not_observed`；已有身份复核闩锁继续保留。权限及其他读取错误直接抛出，不能冒充暂时不可见。直接 path 查询超出 roots 或不是规范绝对路径时同样直接失败，不返回未登记对象的空调查。
+
+引用搜索在 roots 内选定的文本后缀中，按路径或服务名字面匹配，返回文件位置与类型：configuration / source / documentation / self_definition。`AGENTS.md` 仅定位；搜索跳过符号链接、其他卷、排除项和状态目录。大文件、深度、预算和各根覆盖缺口随结果返回，引用内容留在原文件中；权限及其他读取、遍历错误直接抛出。
 
 搜索结果用于确定下一步核对范围。无命中表示在已查范围内没有匹配，依赖结论还需结合实际使用者、调用线索与资源用途判断。
 
 ## 调查预算
 
 整次调查共用 `host.json.limits` 的时间和条目预算，并有以下固定上限：读取最多 100 个文件，每个最多 min(command_bytes, 256 KiB)；文件读取与子进程输出累计最多 min(file_bytes, 2 MiB)；展示最多 20 个引用，截断数量可见。已登记资源的调查摘要最多 32 KiB，同时受单条记录与状态总容量限制。这些是工具硬上限，配置预算可以更小。
+
+命令尚未执行就已耗尽时间或共用字节预算时，结果通过 `investigation_budget` 缺口和对应运行时不可用字段报告，不把空文本当作成功输出。命令非零退出、超时、输出超过上限、严格 UTF-8 解码或启动配置解析失败均直接抛出；预算缺口与实际执行失败分别处理。

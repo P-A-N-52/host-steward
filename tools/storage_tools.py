@@ -7,7 +7,7 @@ import shutil
 import sqlite3
 import time
 
-from database import DATASET_NAMES, SIDECAR_SUFFIXES, format_bytes
+from database import DATASET_NAMES, RESERVE_HEADROOM, SIDECAR_SUFFIXES, format_bytes
 from files import is_canonical_path, within
 from inventory import read_inventory
 from state import Store, StewardError, decode, encode, read_regular_bytes
@@ -170,19 +170,21 @@ def export_dataset(store, dataset, output=None):
 
 
 def backup_database(store, destination):
+    store.database_info()
     store.check_database()
     path = _output_path(store, destination)
     for suffix in SIDECAR_SUFFIXES:
         companion = Path(str(path) + suffix)
         if companion.exists() or companion.is_symlink():
             raise StewardError("备份目标存在 SQLite 伴随文件，请使用全新的输出位置")
-    database_bytes = store.database_path.stat().st_size
+    database_bytes = store._database_bytes(store.database_path)
+    required_bytes = database_bytes * 2 + RESERVE_HEADROOM
     try:
         free = shutil.disk_usage(path.parent).free
     except OSError as exc:
         raise StewardError("无法取得备份目标的空间信息") from exc
-    if free < database_bytes:
-        raise StewardError(f"备份目标空间不足：需要约 {format_bytes(database_bytes)}，"
+    if free < required_bytes:
+        raise StewardError(f"备份目标空间不足：含伴随文件与目标日志预留约需 {format_bytes(required_bytes)}，"
                            f"可用 {format_bytes(free)}")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     os.close(fd)
@@ -213,3 +215,99 @@ def backup_database(store, destination):
             target.close()
     return {"status": "backed_up", "output": str(path), "bytes": path.stat().st_size,
             "verified": True, "scope": "SQLite 一致快照；host.json 与本机指导需分别保存"}
+
+
+def upgrade_state(store, policy, backup=None, apply=False, policy_guard=None):
+    """调用方持有状态锁和采集生命周期锁，备份核对后升级结构与配置。"""
+    from database import Database
+    from policy import convert_v1_policy, policy_digest, read_policy_with_evidence, validate
+
+    validate(policy)
+    actual_policy, _ = read_policy_with_evidence(store.path)
+    if dict(actual_policy) != dict(policy):
+        raise StewardError("升级前本机约定已变化，请重新读取后预览")
+    source_bytes = read_regular_bytes(store.target("host.json"), min(32768, store.limits["file_bytes"]))
+    if decode(source_bytes) != dict(policy):
+        raise StewardError("升级前本机约定已变化，请重新读取后预览")
+    target_policy = convert_v1_policy(policy) if policy["version"] == 1 else dict(policy)
+    target_bytes = encode(target_policy)
+    if len(target_bytes) > min(32768, store.limits["file_bytes"]):
+        raise StewardError("转换后的本机约定超过读取预算，原配置保留；不能省略观察根或授权")
+    database = store._database()
+    schema_plan = database.upgrade_schema()
+    config_change = policy["version"] != target_policy["version"]
+    needs_upgrade = config_change or not schema_plan["already_current"]
+    plan = {
+        "source": str(store.path), "database": schema_plan,
+        "configuration": {"from_version": policy["version"], "to_version": target_policy["version"],
+                          "changed": config_change, "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                          "target_policy_digest": policy_digest(target_policy)},
+        "backup": None if backup is None else os.fspath(backup),
+        "scope_change": "v1 深度预算转为逐 root 声明范围，下一轮重建受影响基线，不据此推断删除" if config_change else None,
+        "rollback": "旧工具不能读取 schema 2；回退须核对切换后新记录，不能直接重新启用旧快照",
+    }
+    if not needs_upgrade:
+        return {"status": "already_current", "applied": False, "plan": plan,
+                "storage": store.database_info()}
+    if not apply:
+        return {"status": "upgrade_plan", "applied": False, "plan": plan}
+    if backup is None or not Path(backup).is_absolute():
+        raise StewardError("执行升级必须用 --backup 指定状态区外全新的绝对路径备份目录")
+    destination = _output_path(store, backup)
+    store.check_database()
+    original_data = store.export_data()
+    if policy_guard:
+        policy_guard()
+    destination.mkdir(mode=0o700)
+    _sync_directory(destination.parent)
+    host_backup = destination / "host.json"
+    _write_output(host_backup, source_bytes)
+    sqlite_backup = destination / "steward.sqlite3"
+    backup_result = backup_database(store, sqlite_backup)
+    backed = Database(sqlite_backup, store.limits["file_bytes"], store.limits["total_bytes"])
+    if backed.export_data() != original_data or read_regular_bytes(host_backup, len(source_bytes)) != source_bytes:
+        raise StewardError("升级备份独立读回与原状态不一致，原状态未切换，保留备份供核对")
+    manifest = {"version": 1, "created_at": time.time(), "plan": plan,
+                "backup": {"host": str(host_backup), "database": backup_result,
+                           "database_sha256": _database_digest(sqlite_backup, store.limits["total_bytes"])},
+                "recovery": "先读回当前配置与数据库版本；结构升级与配置发布分步提交，中断后可能为 schema 2 配置 v1，仍可读取并重新预览"}
+    _write_output(destination / "upgrade.json", encode(manifest))
+    if policy_guard:
+        policy_guard()
+    if read_regular_bytes(store.target("host.json"), min(32768, store.limits["file_bytes"])) != source_bytes:
+        raise StewardError("备份期间本机约定已变化，原状态未切换，请重新预览；已生成备份保留")
+    if store.export_data() != original_data:
+        raise StewardError("备份期间动态状态已变化，原状态未切换，请重新预览；已生成备份保留")
+    phase, schema_confirmed, config_publication = "schema_upgrade", False, "not_attempted"
+    try:
+        schema_result = database.upgrade_schema(
+            apply=True, total_bytes=store.limits["total_bytes"], outside_bytes=store._database_outside(database))
+        schema_confirmed = True
+        phase = "schema_readback"
+        store.check_database()
+        if store.export_data() != original_data:
+            raise StewardError("结构升级后数据集读回不一致，停止发布配置；保留数据库和外部备份供恢复")
+        if config_change:
+            phase = "configuration_guard"
+            if policy_guard:
+                policy_guard()
+            phase, config_publication = "configuration_publish", "unverified"
+            store.write_bytes("host.json", target_bytes)
+        phase = "configuration_readback"
+        loaded_policy, evidence = read_policy_with_evidence(store.path)
+        if dict(loaded_policy) != target_policy:
+            raise StewardError("升级后配置读回不一致，保留当前状态与外部备份供核对")
+    except BaseException as error:
+        import sys
+        sys.stderr.write(encode({
+            "status": "upgrade_incomplete", "phase": phase,
+            "schema_2_confirmed": schema_confirmed,
+            "configuration_publication": config_publication,
+            "backup": str(destination), "original_error_type": type(error).__name__,
+            "message": "升级可能已部分提交；保留当前状态，先核对配置与数据库版本及 upgrade.json，再决定续接；原始异常继续抛出",
+        }).decode("utf-8"))
+        raise
+    return {"status": "upgraded", "applied": True, "plan": plan,
+            "backup": str(destination), "database": schema_result,
+            "policy_version": loaded_policy["version"], "policy_evidence": evidence,
+            "storage": store.database_info(), "capacity": store.capacity()}

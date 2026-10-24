@@ -313,6 +313,15 @@ class MigrationStorageTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             backup_database(store, output)
 
+    def test_backup_checks_source_before_creating_output(self):
+        store = self._initialized()
+        output = (self.base / "invalid-source.sqlite3").resolve()
+        with patch.object(store, "check_database", side_effect=StewardError("源库完整性检查失败")) as check:
+            with self.assertRaisesRegex(StewardError, "源库完整性检查失败"):
+                backup_database(store, output)
+        check.assert_called_once_with()
+        self.assertFalse(output.exists())
+
     def test_backup_preserves_existing_companion_files(self):
         store = self._initialized()
         output = (self.base / "backup.sqlite3").resolve()

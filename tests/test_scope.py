@@ -123,7 +123,8 @@ class ScopeTests(unittest.TestCase):
                 delta = compare({str(self.root): old}, {str(self.root): new})
                 self.assertEqual(delta["changes"], [])
                 self.assertEqual(delta["new_baselines"], [str(self.root)])
-                reasons = delta["gaps"][0]["reasons"]
+                self.assertEqual(delta["gaps"], [])
+                reasons = delta["comparison_gaps"][0]["reasons"]
                 self.assertTrue(any(reason.startswith("scope:") and "exclude_names" in reason for reason in reasons))
 
     def test_filtered_git_addition_and_change_do_not_rebuild_or_report(self):
@@ -170,8 +171,9 @@ class ScopeTests(unittest.TestCase):
                 delta = compare({str(self.root): old}, {str(self.root): new})
                 self.assertEqual(delta["changes"], [])
                 self.assertEqual(delta["new_baselines"], [str(self.root)])
+                self.assertEqual(delta["gaps"], [])
                 self.assertTrue(any(reason.startswith("scope:") and "other_volumes" in reason
-                                    for reason in delta["gaps"][0]["reasons"]))
+                                    for reason in delta["comparison_gaps"][0]["reasons"]))
         self.assertEqual(mounted["excluded"]["other_volume"], 1)
         self.assertEqual(mounted["scope"]["other_volumes"]["count"], 1)
         self.assertEqual(mounted["scope"]["other_volumes"]["samples"],
@@ -225,8 +227,9 @@ class ScopeTests(unittest.TestCase):
             delta = compare({str(self.root): baseline}, {str(self.root): current})
             self.assertEqual(delta["changes"], [])
             self.assertEqual(delta["new_baselines"], [str(self.root)])
+            self.assertEqual(delta["gaps"], [])
             self.assertTrue(any(reason.startswith("scope:") and field in reason
-                                for row in delta["gaps"] for reason in row["reasons"]))
+                                for row in delta["comparison_gaps"] for reason in row["reasons"]))
 
     def test_partial_scan_keeps_old_baseline_and_does_not_rebase_scope(self):
         for index in range(8):
@@ -248,11 +251,12 @@ class ScopeTests(unittest.TestCase):
         delta = compare({str(self.root): legacy_before}, {str(self.root): scoped})
         self.assertEqual(delta["changes"], [])
         self.assertEqual(delta["new_baselines"], [str(self.root)])
-        self.assertTrue(any(reason.startswith("scope:") for row in delta["gaps"] for reason in row["reasons"]))
+        self.assertEqual(delta["gaps"], [])
+        self.assertTrue(any(reason.startswith("scope:") for row in delta["comparison_gaps"] for reason in row["reasons"]))
         legacy_after = copy.deepcopy(scoped)
         legacy_after.pop("scope")
         self.assertEqual(compare({str(self.root): legacy_before}, {str(self.root): legacy_after}),
-                         {"changes": [], "gaps": [], "new_baselines": []})
+                         {"changes": [], "gaps": [], "comparison_gaps": [], "new_baselines": []})
 
 
 if __name__ == "__main__":

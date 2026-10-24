@@ -9,6 +9,7 @@ import time
 import uuid
 
 from files import identity, is_canonical_path, within
+from policy import root_paths
 from state import PolicyChangedError, StewardError, read_regular_bytes
 from state_schema import read_operations
 
@@ -26,7 +27,7 @@ def protect_path(store, path):
 
 def target_rule(store, policy, path):
     path = protect_path(store, path)
-    if not any(within(str(path), root) for root in policy["roots"]):
+    if not any(within(str(path), root) for root in root_paths(policy)):
         raise StewardError("目标超出本机约定的目录范围")
     rules = [rule for rule in policy["directory_rules"] if within(str(path), rule["path"])]
     if not rules:
@@ -151,14 +152,18 @@ def quarantine(store, policy, source, apply=False, policy_guard=None):
     recycled_bytes, count = 0, 0
     if recycle.is_symlink():
         raise StewardError("待回收区不能是符号链接")
-    for parent, directories, files in os.walk(recycle, followlinks=False):
-        for name in directories + files:
-            entry = Path(parent) / name
-            count += 1
-            if entry.is_symlink() or count > 1024:
-                raise StewardError("待回收区需要复核，停止迁入")
-            if entry.is_file():
-                recycled_bytes += entry.stat().st_size
+    pending = [recycle] if recycle.exists() else []
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                info = entry.stat(follow_symlinks=False)
+                count += 1
+                if stat.S_ISLNK(info.st_mode) or count > 1024:
+                    raise StewardError("待回收区需要复核，停止迁入")
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(entry.path)
+                elif stat.S_ISREG(info.st_mode):
+                    recycled_bytes += info.st_size
     if recycled_bytes + path.stat().st_size > recycle_limit:
         raise StewardError("待回收区容量不足；未缩短恢复期或删除已有对象")
     operation_id = uuid.uuid4().hex
@@ -184,7 +189,7 @@ def quarantine(store, policy, source, apply=False, policy_guard=None):
             policy_guard()
         destination.parent.mkdir(parents=True, exist_ok=False)
         if path.stat().st_dev != destination.parent.stat().st_dev:
-            raise StewardError("demo 不进行跨卷回收")
+            raise StewardError("回收仅支持同卷移动")
         os.rename(path, destination)
         if path.exists() or fingerprint(destination) != operation["identity"]:
             raise StewardError("回收验证失败；检查原位置与目标位置")
@@ -259,12 +264,8 @@ def restore(store, policy, operation_id, apply=False, policy_guard=None):
         raise StewardError("恢复验证失败，保留 restoring 记录")
     operation.update(status="restored", restored_at=time.time())
     save_operation(store, operation)
-    cleanup = {"removed": False}
     try:
         target.parent.rmdir()
-        cleanup["removed"] = True
     except FileNotFoundError:
-        cleanup["removed"] = True
-    except OSError as exc:
-        cleanup["reason"] = str(exc)[:200]
-    return {"applied": True, "operation": operation, "cleanup": cleanup}
+        pass
+    return {"applied": True, "operation": operation, "cleanup": {"removed": True}}

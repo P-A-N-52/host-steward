@@ -15,6 +15,7 @@ sys.path.insert(0, str(PROJECT / "tools"))
 from inventory import query, read_definition, read_inventory, register
 from investigate import Budget, inspect_target, process_and_sockets, reference_search, startup_service
 from maintain import quarantine
+from observe import CommandFailedError
 from state import Store, StewardError, encode
 from steward import initialize
 
@@ -240,6 +241,16 @@ class InventoryTests(unittest.TestCase):
         saved = read_inventory(self.store)["resources"]["original"]["inspection"]
         self.assertFalse(saved["identity_review_required"])
 
+    def test_target_permission_error_is_not_reported_as_missing(self):
+        register(self.store, self.definition)
+        baseline = inspect_target(self.store, self.policy, "original")
+        before = dataset_snapshot(self.store, "inventory.json")
+        with patch("investigate.os.lstat", side_effect=PermissionError("调查权限夹具")):
+            with self.assertRaises(PermissionError):
+                inspect_target(self.store, self.policy, "original")
+        self.assertEqual(dataset_snapshot(self.store, "inventory.json"), before)
+        self.assertEqual(baseline["identity_continuity"], "baseline_created")
+
     def test_definition_reader_rejects_special_files_and_oversize_without_blocking(self):
         valid = self.base / "definition.json"
         valid.write_bytes(encode(self.definition))
@@ -315,28 +326,39 @@ class InventoryTests(unittest.TestCase):
         reference_search(str(self.target), self.policy, self.store, budget)
         self.assertLessEqual(budget.bytes, 4)
 
-    def test_fifo_and_outside_target_are_not_read(self):
+    def test_fifo_is_gap_and_outside_target_is_rejected(self):
         fifo = self.root / "pipe.conf"
         os.mkfifo(fifo)
         budget = Budget(self.policy["limits"])
         self.assertIsNone(budget.read(fifo))
-        report = inspect_target(self.store, self.policy, path=str(self.base / "outside"))
+        with self.assertRaises(StewardError):
+            inspect_target(self.store, self.policy, path=str(self.base / "outside"))
+        missing = self.root / "missing"
+        report = inspect_target(self.store, self.policy, path=str(missing))
         self.assertIsNone(report["identity"])
         self.assertFalse(report["recording"]["saved"])
-        self.assertTrue(any(row["reason"] == "path_outside_roots_or_symlink" for row in report["budget"]["gaps"]))
+        self.assertTrue(any(row["reason"] == "target_errno_2" for row in report["budget"]["gaps"]))
 
-    def test_command_probe_counts_raw_bytes_within_shared_budget(self):
+    def test_command_probe_distinguishes_budget_gap_and_execution_failure(self):
         budget = Budget(dict(self.policy["limits"], file_bytes=128))
-        result = budget.run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xff'*1000)"], "byte limit fixture")
-        self.assertIsNone(result)
+        with self.assertRaises(StewardError):
+            budget.run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xff'*1000)"],
+                       "byte limit fixture")
         self.assertLessEqual(budget.bytes, 128)
-        self.assertTrue(budget.gaps)
+        self.assertFalse(budget.gaps)
+
+        exhausted = Budget(dict(self.policy["limits"], scan_seconds=0))
+        with patch("investigate.command") as call:
+            result = exhausted.run([sys.executable, "-c", "print('not run')"], "budget fixture")
+        self.assertIsNone(result)
+        call.assert_not_called()
+        self.assertEqual([row["reason"] for row in exhausted.gaps], ["investigation_budget"])
 
     def test_socket_metadata_reports_truncation_without_process_arguments(self):
         sockets = "p42\n" + "".join(f"f{index}\nPTCP\nn127.0.0.1:{10000 + index}\nTST=LISTEN\n" for index in range(40))
         responses = ["42 1 Fri Oct 16 10:00:00 2026 0.0 100 /usr/bin/example\n", sockets]
         with patch("investigate.platform.system", return_value="Darwin"), \
-             patch("investigate.command", side_effect=[{"ok": True, "reason": None, "text": text} for text in responses]):
+             patch("investigate.command", side_effect=responses):
             report = process_and_sockets(42, Budget(self.policy["limits"]))
         self.assertEqual(len(report["sockets"]), 32)
         self.assertEqual(report["socket_records_observed"], 40)
@@ -353,17 +375,19 @@ class InventoryTests(unittest.TestCase):
         source.write_bytes(plistlib.dumps({"Label": "example.job", "ProgramArguments": ["./bin/app", "DO_NOT_EMIT_ARGUMENT"],
                                           "WorkingDirectory": str(program.parent.parent), "StartInterval": 3600,
                                           "EnvironmentVariables": {"SECRET": "DO_NOT_EMIT_ENV"}}))
-        failure = {"ok": False, "reason": "command_failed", "text": "DO_NOT_EMIT_ERROR_CONTENT"}
+        failure = CommandFailedError(
+            113, "launchctl print", 'Could not find service "example.job" in domain for uid: 501')
         with patch("investigate.platform.system", return_value="Darwin"), \
-             patch("investigate.startup_directories", return_value=[native]), patch("investigate.command", return_value=failure):
+             patch("investigate.startup_directories", return_value=[native]), patch("investigate.command", side_effect=failure):
             budget = Budget(self.policy["limits"])
             report = startup_service("launchd:user/example.job", budget)
         self.assertIsNone(report["pid"])
+        self.assertEqual(report["runtime_state"], "not_loaded")
         self.assertTrue(report["program_exists"])
         self.assertEqual(report["resolved_program"], str(program))
         self.assertEqual(report["start_interval"], 3600)
         self.assertNotIn("DO_NOT_EMIT", encode(report).decode())
-        self.assertTrue(budget.gaps)
+        self.assertIn("service_not_loaded", [row["reason"] for row in budget.gaps])
 
     def test_systemd_user_scope_and_effective_executable_do_not_emit_arguments(self):
         native = self.base / "systemd-user"
@@ -373,7 +397,7 @@ class InventoryTests(unittest.TestCase):
         output = f"Id=example.service\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\nFragmentPath={source}\nDropInPaths=\nWorkingDirectory=/\nExecStart={{ path=/bin/sh ; argv[]=/bin/sh SECRET_ARGS ; }}\n"
         with patch("investigate.platform.system", return_value="Linux"), \
              patch("investigate.startup_directories", return_value=[native]), \
-             patch("investigate.command", return_value={"ok": True, "reason": None, "text": output}) as call:
+             patch("investigate.command", return_value=output) as call:
             report = startup_service("systemd:user/example.service", Budget(self.policy["limits"]))
         self.assertIn("--user", call.call_args[0][0])
         self.assertEqual(report["pid"], 42)
@@ -381,6 +405,64 @@ class InventoryTests(unittest.TestCase):
         self.assertNotIn("SECRET_ARGS", encode(report).decode())
         self.assertNotIn("secret-value", encode(report).decode())
         self.assertEqual(len(report["configurations"]), 1)
+
+    def test_systemd_not_found_keeps_static_configuration_and_runtime_gap(self):
+        native = self.base / "systemd-user"
+        native.mkdir()
+        source = native / "example.service"
+        source.write_text("[Service]\nExecStart=/bin/sh secret-value\n")
+        output = ("Id=example.service\nLoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+                  "MainPID=0\nFragmentPath=\nDropInPaths=\nWorkingDirectory=\nExecStart=\n")
+        with patch("investigate.platform.system", return_value="Linux"), \
+             patch("investigate.startup_directories", return_value=[native]), \
+             patch("investigate.command", return_value=output):
+            budget = Budget(self.policy["limits"])
+            report = startup_service("systemd:user/example.service", budget)
+        self.assertIsNone(report["pid"])
+        self.assertEqual(report["load_state"], "not-found")
+        self.assertEqual([row["path"] for row in report["configurations"]], [str(source)])
+        self.assertIn("service_not_loaded", [row["reason"] for row in budget.gaps])
+        self.assertNotIn("secret-value", encode(report).decode())
+
+    def test_macos_actual_not_loaded_prefix_is_a_bounded_runtime_gap(self):
+        native = self.base / "LaunchAgents"
+        native.mkdir()
+        output = 'Bad request.\nCould not find service "example.job" in domain for user gui: 501\n'
+        failure = CommandFailedError(113, "launchctl print", output)
+        with patch("investigate.platform.system", return_value="Darwin"), \
+             patch("investigate.startup_directories", return_value=[native]), \
+             patch("investigate.command", side_effect=failure):
+            budget = Budget(self.policy["limits"])
+            report = startup_service("launchd:user/example.job", budget)
+        self.assertEqual(report["runtime_state"], "not_loaded")
+        self.assertIsNone(report["pid"])
+        self.assertIn("service_not_loaded", [row["reason"] for row in budget.gaps])
+
+    def test_macos_unknown_prefix_or_returncode_keeps_original_error(self):
+        not_loaded = 'Could not find service "example.job" in domain for user gui: 501'
+        for code, output in [(1, not_loaded), (113, "permission denied\n" + not_loaded),
+                             (113, "Bad request.\npermission denied")]:
+            with self.subTest(code=code, output=output):
+                failure = CommandFailedError(code, "launchctl print", output)
+                with patch("investigate.platform.system", return_value="Darwin"), \
+                     patch("investigate.command", side_effect=failure):
+                    with self.assertRaises(CommandFailedError) as error:
+                        startup_service("launchd:user/example.job", Budget(self.policy["limits"]))
+                self.assertIs(error.exception, failure)
+
+    def test_other_service_command_failures_are_not_not_loaded(self):
+        for manager, platform_name, locator in [
+            ("launchd", "Darwin", "launchd:user/example.job"),
+            ("systemd", "Linux", "systemd:user/example.service"),
+        ]:
+            with self.subTest(manager=manager):
+                failure = CommandFailedError(1, manager, "permission denied")
+                with patch("investigate.platform.system", return_value=platform_name), \
+                     patch("investigate.command", side_effect=failure):
+                    budget = Budget(self.policy["limits"])
+                    with self.assertRaises(CommandFailedError):
+                        startup_service(locator, budget)
+                self.assertFalse(budget.gaps)
 
     def test_cli_reads_persisted_definition_in_a_separate_process_and_cwd(self):
         definition = self.base / "definition.json"
@@ -410,9 +492,9 @@ class InventoryTests(unittest.TestCase):
                     read_definition(definition)
                 result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "inventory", "--state", str(self.store.path),
                                          "--record", str(definition)], cwd="/", capture_output=True, text=True, timeout=5)
-                self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertEqual(json.loads(result.stderr)["status"], "blocked")
-                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
                 self.assertEqual(dataset_snapshot(self.store, "inventory.json"), before)
 
     def test_alias_definition_is_rejected_and_query_is_read_only_canonical(self):

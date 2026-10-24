@@ -1,6 +1,8 @@
-# Host Steward 0.2 Demo
+# Host Steward 0.2
 
-这是一个面向 AI 助手的 skill，帮助它长期整理主机上的各类文件，照看相关的程序和运行环境。它会记住资源的用途、归属和保留理由，让下一次维护能接着上次继续。
+**面向 AI 助手的主机长期维护 skill：整理文件、照看程序与运行环境，记住资源的用途、归属和保留理由，让每一轮工作接着上一轮继续。**
+
+以 [MIT 许可证](LICENSE)发布，支持 macOS 和 Linux，只依赖 Python 3.9+ 标准库。
 
 ## 使用方式
 
@@ -12,8 +14,6 @@ https://github.com/P-A-N-52/host-steward
 请使用 Host Steward 帮我长期管理这台电脑上的文件和相关运行环境。
 先读取 SKILL.md，按入口说明准备运行内容，和我确认管理范围，从只读盘点开始。
 ```
-
-目前支持 macOS 和 Linux，需要 Python 3.9+，只使用标准库。
 
 ## 为什么我们要做这个 skill
 
@@ -49,11 +49,7 @@ host-steward/
 
 ## 开发
 
-仓库开发约定见 [AGENTS.md](AGENTS.md)。统一测试入口：
-
-```sh
-python3 -m unittest discover -s tests -v
-```
+仓库开发约定见 [AGENTS.md](AGENTS.md)。验证使用实际主机与正式 CLI，记录操作、观测范围、耗时和状态读回结果。
 
 ## 许可证
 

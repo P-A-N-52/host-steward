@@ -71,8 +71,8 @@ def read_inventory(store):
     if not isinstance(data, dict) or set(data) != {"version", "resources"} or type(data["version"]) is not int or data["version"] != 1:
         raise StewardError("本机档案格式错误，保留原状态")
     resources = data["resources"]
-    if not isinstance(resources, dict) or len(resources) > 128:
-        raise StewardError("资源档案格式或数量无效，最多 128 项")
+    if not isinstance(resources, dict):
+        raise StewardError("资源档案格式无效")
     for key, entry in resources.items():
         if not isinstance(entry, dict) or set(entry) != {"definition", "recorded_at", "anchor", "inspection"}:
             raise StewardError("资源条目损坏，保留原状态")
@@ -99,8 +99,6 @@ def register(store, record):
     old = data["resources"].get(record["id"])
     if old and old["definition"] == record:
         return {"status": "unchanged", "id": record["id"]}
-    if not old and len(data["resources"]) >= 128:
-        raise StewardError("资源档案已达 128 项，未淘汰任何长期知识")
     data["resources"][record["id"]] = {"definition": record, "recorded_at": time.time(),
                                        "anchor": None, "inspection": None}
     store.write("inventory.json", data)

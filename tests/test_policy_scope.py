@@ -10,6 +10,7 @@ from unittest.mock import patch
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "tools"))
 from files import identity
+from policy import new_root
 from state import StewardError, encode
 from state_schema import read_current
 from steward import initialize, patrol, validate
@@ -53,7 +54,8 @@ class PolicyScopeTests(unittest.TestCase):
         validate(self.policy)
         self.store.write("host.json", self.policy)
         result = self.cli("quarantine", "--path", target, "--apply")
-        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("Traceback", result.stderr)
         self.assertEqual(target.read_text(), "需要保留的原始资料")
         self.assertFalse((self.root / ".recycle").exists())
 
@@ -71,9 +73,8 @@ class PolicyScopeTests(unittest.TestCase):
                 self.store.write("host.json", policy)
                 before = self.store.target("host.json").read_bytes()
                 result = self.cli("quarantine", "--path", target, "--apply")
-                self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertEqual(json.loads(result.stderr)["status"], "blocked")
-                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("Traceback", result.stderr)
                 self.assertEqual(target.read_text(), "keep")
                 self.assertEqual(self.store.read("operations.json", []), [])
                 self.assertEqual(self.store.target("host.json").read_bytes(), before)
@@ -98,12 +99,16 @@ class PolicyScopeTests(unittest.TestCase):
         for value in (None, [], 1, "", ".", "..", "a/b", "bad\x00name"):
             with self.subTest(value=value):
                 policy = copy.deepcopy(self.policy)
-                policy["exclude_names"] = [value]
+                policy["roots"][0]["exclude_names"] = [value]
                 with self.assertRaises(StewardError):
                     validate(policy)
         policy = copy.deepcopy(self.policy)
-        policy["exclude_names"] += [".git", ".git"]
+        policy["roots"][0]["exclude_names"] += [".git", ".git"]
         validate(policy)
+        policy = copy.deepcopy(self.policy)
+        policy["exclude_names"] = [".git"]
+        with self.assertRaises(StewardError):
+            validate(policy)
 
     def test_retired_roots_are_pruned_and_reentry_creates_fresh_baseline(self):
         other = self.base / "other"
@@ -112,7 +117,7 @@ class PolicyScopeTests(unittest.TestCase):
         self.run_patrol()
         (self.root / "old-change").write_text("old")
         self.run_patrol()
-        self.policy["roots"] = [str(other)]
+        self.policy["roots"] = [new_root(str(other))]
         self.store.write("host.json", self.policy)
         report = self.run_patrol()
         self.assertEqual(report["new_baselines"], [str(other)])
@@ -120,7 +125,7 @@ class PolicyScopeTests(unittest.TestCase):
         self.assertEqual(set(current["baselines"]), {str(other)})
         self.assertTrue(any(row["root"] == str(self.root) for row in current["changes"]))
         (self.root / "unobserved").write_text("new")
-        self.policy["roots"] = [str(self.root)]
+        self.policy["roots"] = [new_root(str(self.root))]
         self.store.write("host.json", self.policy)
         report = self.run_patrol()
         self.assertEqual(report["new_baselines"], [str(self.root)])
@@ -139,17 +144,21 @@ class PolicyScopeTests(unittest.TestCase):
         target = cache / "keep"
         target.write_bytes(b"x" * 10)
         self.run_patrol()
-        self.policy["exclude_names"].append("cache")
+        self.policy["roots"][0]["exclude_names"].append("cache")
         self.store.write("host.json", self.policy)
         report = self.run_patrol()
         self.assertEqual(report["changes"], [])
         self.assertEqual(report["new_baselines"], [str(self.root)])
         self.assertTrue(report["last_run"]["coverage_complete"])
-        self.assertTrue(any(reason.startswith("scope:") for row in report["gaps"] for reason in row["reasons"]))
+        self.assertEqual(report["gaps"], [])
+        self.assertTrue(any(reason.startswith("scope:") for row in report["comparison_gaps"] for reason in row["reasons"]))
         self.assertEqual(report["coverage_scope"][str(self.root)]["excluded"]["configured"], 1)
         self.assertTrue(target.is_file())
         self.assertFalse(any(row["kind"] == "directory_growth" for row in report["pending"]))
-        self.assertEqual(self.run_patrol()["gaps"], [])
+        recovered = self.run_patrol()
+        self.assertEqual(recovered["gaps"], [])
+        self.assertEqual(recovered["comparison_gaps"], [])
+        self.assertTrue(recovered["observations_changed"])
         self.assertFalse(self.run_patrol()["observations_changed"])
 
     def test_legacy_scope_is_upgraded_only_after_complete_snapshot(self):
@@ -171,7 +180,8 @@ class PolicyScopeTests(unittest.TestCase):
         upgraded = self.run_patrol()
         self.assertEqual(upgraded["new_baselines"], [str(self.root)])
         self.assertEqual(upgraded["changes"], [])
-        self.assertTrue(any(reason.startswith("scope:") for row in upgraded["gaps"] for reason in row["reasons"]))
+        self.assertEqual(upgraded["gaps"], [])
+        self.assertTrue(any(reason.startswith("scope:") for row in upgraded["comparison_gaps"] for reason in row["reasons"]))
         (directory / "new").write_text("new")
         self.assertTrue(self.run_patrol()["changes"])
 
@@ -190,7 +200,7 @@ class PolicyScopeTests(unittest.TestCase):
         self.run_patrol()
         original = read_current(self.store)
         payloads = []
-        for field, value in (("device", True), ("exclude_names", ["x", "x"]), ("scan_depth", "bad")):
+        for field, value in (("device", True), ("exclude_names", ["x", "x"]), ("max_depth", "bad")):
             current = copy.deepcopy(original)
             current["baselines"][str(self.root)]["scope"][field] = value
             payloads.append(current)
@@ -210,9 +220,9 @@ class PolicyScopeTests(unittest.TestCase):
                 before = dataset_snapshot(self.store, "current.json")
                 with self.assertRaises(StewardError):
                     read_current(self.store)
-                result = self.cli("status")
-                self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertNotIn("Traceback", result.stderr)
+                result = self.cli("patrol")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("Traceback", result.stderr)
                 self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
 
 

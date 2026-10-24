@@ -6,12 +6,14 @@
 
 1. 根据本轮任务确认是只读调查还是维护，读取 `host.json` 核对范围和预算；用 `status` 查看待核验事项，用 `export --dataset operations` 查看操作证据。按 [inventory](inventory.md) 读相关长期知识，状态或恢复问题进入 [recovery](situations/recovery.md)。
 2. 运行 `python3 /skill目录/tools/steward.py patrol --state /本机状态`，采集有限的整机与进程事实，并把内存计数器、swap、网络接口计数、GPU 与电源等主机级样本随轮存入 samples，供跨轮差分判断趋势。macOS 读取 FSEvents 线索并核对 roots 内的元数据快照，Linux 比较快照。
-3. 先检查 gaps、coverage_scope、观测可用性和扫描完整性，再判断占用与变化。预算耗尽的范围留作后续检查；scope 变化按 [files-storage](situations/files-storage.md) 重建可比基线。目录大小包含子树，比较时选择互不重叠的统计范围。
+3. 先检查扫描覆盖 gaps（状态中的 coverage_gaps）、comparison_gaps、coverage_scope、观测可用性和扫描完整性，再判断占用与变化。扫描缺口表示本轮未能扫全，比较缺口表示跨轮比较的范围或身份不连续，按 [files-storage](situations/files-storage.md#先看变化覆盖了哪里) 分别解释。`coverage_scope` 中未完成的 root 带有 `resumable`（已用轮数、已处理条目、待扫目录数），表示后续轮次会继续该范围；只有完整且没有覆盖缺口的 pass 才更新基线并参与删除判断。同一目录 mtime 持续变化会让本 pass 记为覆盖不完整：本轮只记缺口、不更新基线，下一轮从头复核。平台事件线索形成的待复核目录见 `status.event_recheck`（首次/最近时间、次数与 `degraded` 原因）及 `coverage_scope.*.event_recheck` 摘要；它们只缩小下一轮复核范围，变化仍以完整扫描比较为准。目录大小包含子树，比较时选择互不重叠的统计范围。
 4. 由 agent 结合主机用途、任务进展、依赖、可恢复性与成本判断本轮工作。工具提供变化与采样事实，是否异常、怎样整理及优先级由 agent 决定。按需 `inspect --id` 补查，并进入对应专项指导。`status` 返回的 directory_index 中，agents 字段定位目录说明，维护相关对象前按需读取。
 5. 将本轮候选工作按下述[维护流程](#维护流程)处理。只读模式完成调查、建议与计划；维护模式完成本轮已授权的动作。
 6. 核对本轮状态是否保存、`capacity` 的数据库可写余量与自身开销，以及覆盖缺口和待核验事项是否完整。无后续工作时结束；有严重故障、维护异常、目标持续受阻、异常成本、重要成果或需要用户取舍时通知，同类问题合并报告。
 
 自身观测、知识和待核验事项的状态更新属于巡检收尾。
+
+命令失败时先读 stderr 的 traceback，定位原始命令、文件或解析错误，修正原因后重新运行。失败巡检不会提交新的 current；`status.last_run` 仍表示上次成功巡检，不能证明失败这轮已经完成。平台能力缺失与预算截断仍在正式结果中分别说明。
 
 ## 维护流程
 
@@ -23,13 +25,42 @@
 
 ## 查询与输出
 
-用 `python3 /skill目录/tools/steward.py status --state /本机状态 --path /相关目录 --limit 10` 查询相关对象，`--offset` 可分页。过期观测标为 stale；`capacity` 显示数据库可长期写入的上限与当前余量。需要 host、events、samples 等完整观测或输出带 `output_limited: true` 时，用 `export --dataset current --output /外部目录/current-export.json` 导出后按字段读取，命令与输出约定见[接管指导](setup.md#旧状态迁移与导出)。
+用 `python3 /skill目录/tools/steward.py status --state /本机状态 --path /相关目录 --limit 10` 查询相关对象，`--offset` 可分页。过期观测标为 stale；`capacity` 显示数据库可长期写入的上限与当前余量；`collector` 段报告常驻采集的运行/停止状态、心跳年龄、缺口与来源最后成功时间，没有运行记录时明确报 `not_started`，不冒充运行中。需要 host、events、samples 等完整观测或输出带 `output_limited: true` 时，用 `export --dataset current --output /外部目录/current-export.json` 导出后按字段读取，命令与输出约定见[接管指导](setup.md#旧状态迁移与导出)。
 
-定时调用 `patrol` 可加 `--quiet`，工具仅在本轮 `observations_changed` 为真时输出，表示文件变化、新基线或覆盖缺口变化。是否值得维护和通知由 agent 判断；即使命令静默，也要查看既有待核验事项及按任务需要查询 samples 等观测。
+常驻资源历史用 `samples` 查询，它不等待巡检锁，采集运行中也可即时读取：
+
+```sh
+python3 /skill目录/tools/steward.py samples --state /本机状态                 # 最近十分钟摘要
+python3 /skill目录/tools/steward.py samples --state /本机状态 --process 完整identity  # 单进程序列
+python3 /skill目录/tools/steward.py samples --state /本机状态 --since A --until B --before 上一页最老sample_id  # 固定窗口分页
+python3 /skill目录/tools/steward.py samples --state /本机状态 --raw --output /外部目录/本页.json              # 本页完整原始事实
+```
+
+返回按时间倒序；`summary` 只统计本页样本，`boundary` 用窗外前驱说明页首变化的可比性；进程、网卡、磁盘的 top-N 截断视野用 `entered/left_bounded_snapshot` 表达，不称启动或消失。默认未载入进程历史时标 `process_changes_not_loaded`。`--output` 导出不受终端输出预算裁剪；预算裁剪到无样本时报告 `pagination_blocked_by_output` 并以非零退出，不把空结果当作查询成功。
+
+定时调用 `patrol` 可加 `--quiet`，工具仅在本轮 `observations_changed` 为真时输出，表示文件变化、新基线，或扫描、比较、整机观测缺口的出现与消失。是否值得维护和通知由 agent 判断；即使命令静默，也要查看既有待核验事项及按任务需要查询 samples 等观测。
+
+### 宿主脚本传递巡检事实
+
+宿主脚本将采样、变化和缺口原因交给 agent，保留观察时间、范围、来源、可用性和截断信息。缺口需带 root、kind 及 reason/reasons 等原有字段；汇总只展示部分原因时，附上省略数量与完整输出或状态的读取入口。输出带 `output_limited` 时，先按上面的导出方式补读，再作结论。
+
+阈值可以筛选需要调查的候选；是否异常、是否通知由 agent 结合用途、任务进展和持续影响判断。宿主确需候选筛选阈值时，放在其可审阅的本机配置中，写明用途与采样口径；应用名称排除表会隐藏相关观测，应由 agent 根据上下文辨认正常工作。进程上下文的调查方法见[资源指导](situations/resources.md#核对资源来自哪里)。
 
 ## 待核验事项与记录收尾
 
-普通变化按 `host.json.limits` 的窗口和条数滚动保留，淘汰数量可见。agent 用 `track` 登记需要跨轮跟进的事项，说明判断依据、未知项和下一步；相同 key 更新说明并保留首次登记时间。确认已处理或无需跟进后用 `resolve` 关闭：
+普通变化按 `host.json.limits.retention_hours` 与 `change_records` 两个上限滚动保留：先移除到期记录，再按条数保留最近写入的记录。时间上限表示最长保留年龄，实际保留范围同时受条数限制。`patrol` 与 `status` 的 `change_retention` 描述最近一次成功巡检保存的全局历史，独立于查询路径与分页：
+
+| 字段 | 含义 |
+| --- | --- |
+| `retention_hours`、`record_limit` | 本轮采用的时间与条数上限。 |
+| `expired_by_age` | 本轮因超过时间上限淘汰的条数。 |
+| `evicted_by_count` | 时间筛选后，本轮因条数上限淘汰的条数。 |
+| `oldest_observed_at`、`newest_observed_at` | 现存变化记录最早、最晚的观察时间；空历史为 null。 |
+| `span_hours` | 上述两端的小时差；单条为 0，空历史为 null。它描述记录跨度，完整观察范围仍需结合巡检与缺口证据判断。 |
+
+两个淘汰数都只统计本轮，非零表示预算内的滚动保留行为。`change_records_dropped` 兼容旧调用，值等于 `evicted_by_count`；它不累计，也不包含到期淘汰。agent 结合历史是否足够支持当前工作决定下一步，状态写入失败与 `capacity.writable` 则单独核对。旧状态尚无 `change_retention` 时，`status` 返回 null，下一次成功巡检生成该摘要。
+
+agent 用 `track` 登记需要跨轮跟进的事项，说明判断依据、未知项和下一步；相同 key 更新说明并保留首次登记时间。确认已处理或无需跟进后用 `resolve` 关闭：
 
 ```sh
 python3 /skill目录/tools/steward.py track --state /本机状态 --key 事项键 --reason '判断依据、待查问题和下一步'

@@ -42,7 +42,7 @@ class InitializationTests(unittest.TestCase):
         payloads = {"steward.sqlite3": Store.empty_database_bytes()}
         payloads.update(self._guidance())
         payloads["adaptation.json"] = encode(
-            {"source_version": "0.2.0-demo", "removed_sections": [],
+            {"source_version": "0.2.0", "removed_sections": [],
              "reason": "保留通用说明；具体能力和权限以观测结果、本机约定为准"})
         payloads["host.json"] = encode(policy)
         return payloads
@@ -135,7 +135,7 @@ class InitializationTests(unittest.TestCase):
             initialize(directory, [self.root], "不能重置")
         self.assertEqual(self._snapshot(directory), before)
 
-    def test_public_cli_reinit_preserves_old_knowledge_and_reports_block(self):
+    def test_public_cli_reinit_preserves_old_knowledge_and_reports_traceback(self):
         directory = self.base / "cli-state"
         store, _ = initialize(directory, [self.root], "第一次初始化")
         old = {
@@ -151,19 +151,18 @@ class InitializationTests(unittest.TestCase):
         environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         missing = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "status", "--state", str(directory)],
                                  cwd="/", capture_output=True, text=True, timeout=5, env=environment)
-        self.assertEqual(missing.returncode, 2, missing.stderr)
-        reason = json.loads(missing.stderr)["reason"]
-        self.assertIn("恢复", reason)
-        self.assertNotIn("请先 init", reason)
+        self.assertEqual(missing.returncode, 1, missing.stderr)
+        self.assertIn("Traceback", missing.stderr)
+        self.assertIn("恢复", missing.stderr)
+        self.assertNotIn("请先 init", missing.stderr)
         result = subprocess.run(
             [sys.executable, str(PROJECT / "tools/steward.py"), "init", "--state", str(directory),
              "--root", str(self.root), "--purpose", "不应覆盖"],
             cwd=str(PROJECT), capture_output=True, text=True, timeout=5, env=environment)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        report = json.loads(result.stderr)
-        self.assertEqual(report["status"], "blocked")
-        self.assertIn("初始化仅接受空状态目录", report["reason"])
-        self.assertIn("不覆盖", report["reason"])
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("Traceback", result.stderr)
+        self.assertIn("初始化仅接受空状态目录", result.stderr)
+        self.assertIn("不覆盖", result.stderr)
         self.assertEqual(result.stdout, "")
         self.assertEqual(self._snapshot(directory), before)
 
@@ -246,7 +245,7 @@ class InitializationTests(unittest.TestCase):
                     self.assertTrue((directory / "guidance").is_dir())
                     self.assertIn("残留", str(caught.exception))
 
-    def test_external_rewrite_preserves_changed_file_and_cleans_safe_files(self):
+    def test_external_rewrite_stops_rollback_and_preserves_uncleaned_files(self):
         directory = self.base / "rewrite-state"
         original = Store.write_bytes
 
@@ -259,10 +258,11 @@ class InitializationTests(unittest.TestCase):
             return result
 
         with patch.object(Store, "write_bytes", new=rewrite_then_fail):
-            with self.assertRaisesRegex(StewardError, "guidance/inventory.md"):
+            with self.assertRaisesRegex(StewardError, "残留") as caught:
                 initialize(directory, [self.root], "外部改写")
+        self.assertIn("guidance/inventory.md", str(caught.exception))
         self.assertEqual((directory / "guidance/inventory.md").read_bytes(), b"external rewrite survives\n")
-        self.assertFalse((directory / "steward.sqlite3").exists())
+        self.assertTrue((directory / "steward.sqlite3").exists())
         self.assertFalse((directory / "guidance/patrol.md").exists())
         self.assertFalse((directory / "adaptation.json").exists())
         self.assertFalse((directory / "host.json").exists())
@@ -303,7 +303,7 @@ class InitializationTests(unittest.TestCase):
             self.assertEqual((directory / name).read_bytes(), payload)
         host = directory / "host.json"
         self.assertTrue(host.exists())
-        self.assertEqual(decode(host.read_bytes())["roots"], [str(self.root)])
+        self.assertEqual([row["path"] for row in decode(host.read_bytes())["roots"]], [str(self.root)])
         load(directory)
         self.assertFalse(list(directory.rglob(".writing-*")))
 

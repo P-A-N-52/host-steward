@@ -14,7 +14,7 @@
 | 定时安排 | 使用哪个调度机制、时区、具体时刻或间隔、允许维护的时间段，以及暂停和恢复办法 | 宿主任务配置，记录任务标识供后续查询 |
 | 通知方式 | 正常结果是否汇总、汇总时间与渠道；异常和需要用户取舍时如何通知 | 宿主通知配置与本机巡检指导 |
 
-`host.json` 是本机授权的唯一来源。观察范围不等于变更权限，定时触发也不增加权限；宿主任务和指导引用已确认的约定。当前工具直接识别的字段见下文，调度由宿主执行，不能只在 `host.json` 中填写时间便视为任务已建立。
+`host.json` 是本机授权与观察范围的唯一来源。当前模板使用 v2：每个 root 是独立对象，采样设置写在 `sampling`；旧 v1 配置仍可读取，但顶层 `exclude_names` 与 `limits.scan_depth` 只属于 v1，不会与 v2 规则同时生效。观察范围不等于变更权限，定时触发也不增加权限；宿主任务和指导引用已确认的约定。当前工具直接识别的字段见下文，调度由宿主执行，不能只在 `host.json` 中填写时间便视为任务已建立。
 
 ## 取得运行内容
 
@@ -30,7 +30,7 @@ host-steward/
 
 仓库的介绍、开发约定、设计文档、测试和上游参考留在开发侧。运行时从 `SKILL.md` 进入，按任务读取指导和所需工具。每台主机使用独立的部署副本，以便完成接管后移除该副本的首次引导。
 
-确认本机为 macOS/Linux 且有 Python 3.9+，工具只依赖标准库。用 `python3 /skill目录/tools/steward.py --help` 核对命令入口，任务配置使用已验证的 Python 绝对路径。当前为 0.2 demo，macOS 已有实机验证，Linux 分支只有离线测试；部署时核对本机可用观测与缺口。维护命令的预览、执行和恢复约定按[文件与存储](situations/files-storage.md)及[恢复指导](situations/recovery.md)读取，其他维护动作由本地 agent 在对应授权内使用已有工具完成。
+确认本机为 macOS/Linux 且有 Python 3.9+，工具只依赖标准库。用 `python3 /skill目录/tools/steward.py --help` 核对命令入口，任务配置使用已验证的 Python 绝对路径。当前为 0.2，macOS 与 Linux（K6）已实测巡检、文件变化、缺口、历史轮转、状态读写、备份，以及自建临时文件的说明写入、回收与恢复；常驻资源采集（`collect`/`samples`）已在 macOS 实测第一里程碑，Linux 端待 K6 实机验收；部署时核对本机可用观测与缺口。维护命令的预览、执行和恢复约定按[文件与存储](situations/files-storage.md)及[恢复指导](situations/recovery.md)读取，其他维护动作由本地 agent 在对应授权内使用已有工具完成。
 
 ## 确定范围与部署位置
 
@@ -39,11 +39,11 @@ host-steward/
 每台主机的状态独立保存在 skill 目录之外。本地 agent 用自己的现有记录方式保存 skill 目录和 `--state` 的绝对路径，后续轮次沿用；已有状态先核对并继续使用，确认为尚未接管的新主机再初始化。已有部署的路径丢失、状态缺失或损坏按 [recovery](situations/recovery.md) 处理。
 
 ```sh
-python3 /skill目录/tools/steward.py init --state /绝对路径/本机状态 --root /绝对路径/观察目录 --purpose '主机主要用途'
+python3 /skill目录/tools/steward.py init --state /绝对路径/本机状态 --root /绝对路径/观察目录 --max-depth 3 --purpose '主机主要用途'
 python3 /skill目录/tools/steward.py patrol --state /绝对路径/本机状态
 ```
 
-观察目录用 `--root` 逐个指定，选择不包含 skill 内容的范围；整机资源观测与目录覆盖分别报告。
+观察目录用 `--root` 逐个指定，选择不包含 skill 内容的范围；`--max-depth` 为该次初始化的所有 root 指定非负深度，省略时默认 32。整机资源观测与目录覆盖分别报告。`init` 的 `--state` 与 `--root` 都只接受已确认的绝对路径，不展开 `~`、相对路径或服务账户 home；符号链接与路径别名按实际目标解析，并把输入与实际目标一起写入 `root_resolution`。状态目录不能包含观察 root；状态目录位于 root 内时由扫描排除。运行期 root 暂不可见、未挂载或不再是目录时记录缺口，不会自动改用其他目录，也不会据此推断删除。
 
 ## 初始化与状态布局
 
@@ -79,13 +79,36 @@ python3 /skill目录/tools/steward.py export --state /本机状态 --dataset ope
 python3 /skill目录/tools/steward.py backup --state /本机状态 --output /外部目录/steward-backup.sqlite3
 ```
 
-导出包含数据集名称、来源、导出时间与 data；省略 `--output` 时结果受工具输出预算限制。`backup` 使用 SQLite 备份接口并校验数据库，生成动态状态的一致快照；备份写在状态区外，工具核对目标目录可用空间，时间使用本轮时间预算。`host.json`、`adaptation.json` 与本机指导另行保存；备份的长期保留由本机既有安排管理。
+导出包含数据集名称、来源、导出时间与 data；省略 `--output` 时结果受工具输出预算限制。`backup` 使用 SQLite 备份接口并校验数据库，生成动态状态的一致快照；备份写在状态区外，按主库、伴随文件与目标日志预留核对可用空间，时间使用本轮时间预算。`host.json`、`adaptation.json` 与本机指导另行保存；备份的长期保留由本机既有安排管理。
+
+## 配置与结构显式升级
+
+新初始化使用配置 v2 与数据库 schema 2。已有 v1 配置和 schema 1 数据集仍可读写，不在连接时自动改版。JSON 状态先按上节 `migrate` 导入，再预览配置与结构升级：
+
+```sh
+python3 /skill目录/tools/steward.py upgrade --state /本机状态
+python3 /skill目录/tools/steward.py upgrade --state /本机状态 --apply --backup /外部目录/本次升级备份
+```
+
+预览不改配置或数据库。执行时 `--backup` 必须是状态区外的绝对路径，父目录已存在、备份目录尚不存在；工具先保存原字节 `host.json`、SQLite 一致快照与 `upgrade.json`，独立读回核对后才升级。目录规则、授权、用途、未知扩展和原预算保留，不自动提高容量。v1 深度与排除项转为逐 root 配置，下一轮重建不可比的基线，范围变化不算删除。
+
+执行升级取得状态锁与 `.collector.lock` 生命周期锁；采集运行时拒绝应用。schema 与配置分别提交，中断后可能出现 schema 2 配置 v1，先按[升级中断](situations/recovery.md#配置与结构升级中断)读回版本再续接。旧工具不能读取 schema 2；回退须核对切换后的新记录，不能直接启用旧备份丢弃新证据。本机指导、裁剪清单和运行代码版本另行保全，升级命令不覆盖它们。
 
 ## 配置本机约定
 
-初始常驻清单与目录规则为空，按接管结果在 `host.json` 中填写。roots 和规则路径使用无符号链接的规范绝对路径；常驻条目包含 `executable` 和保护原因 `reason`。
+初始常驻清单与目录规则为空，按接管结果在 `host.json` 中填写。v2 的每个 root 包含 `path`、`max_depth`、`exclude_names` 和 `exclude_paths`：`max_depth` 为非负整数，0 表示只检查 root 的直属条目；`exclude_names` 按单层名称匹配，`exclude_paths` 相对于该 root、按路径分量匹配指定文件或子树，不能越出 root。root 与规则路径使用无符号链接的规范绝对路径，保留原有大小写、Unicode 与空格；root 之间不能重叠或指向同一 `samefile` 对象。目录规则包含 `path`、`purpose` 和 `kind`。类别由 agent 按本机用途命名，为最多 64 字节的非空短文本；可沿用 cold / temporary / active / service。每个规范路径配置一条，嵌套目录采用最具体的规则。类别本身不增加权限，`allow_notes`、`allow_quarantine` 缺省为不允许，按接管时确认的动作填写；当前回收工具只接受明确授权的 `temporary` 文件。
 
-目录规则包含 `path`、`purpose` 和 `kind`。类别由 agent 按本机用途命名，为最多 64 字节的非空短文本；可沿用 cold / temporary / active / service。每个规范路径配置一条，嵌套目录采用最具体的规则。类别本身不增加权限，`allow_notes`、`allow_quarantine` 缺省为不允许，按接管时确认的动作填写；当前回收工具只接受明确授权的 `temporary` 文件。
+`sampling` 只在 v2 使用，包含主机采样间隔、单轮时间预算、进程采样间隔、每页进程数、历史条数与保留小时；字段必须是完整正整数，单轮时间预算不得大于主机采样间隔，`process_interval_seconds` 不得小于 `interval_seconds`。`cycle_seconds` 是单批命令的真实耗时预算：macOS 的 `iostat -c 2` 自身约需 1 秒，周期低于实际命令下限（如 1 秒）时整批按预算失败并记录缺口，不会伪造样本；调整周期前先用 `collect --once` 核对本机实际耗时。旧 v1 主机继续按字符串 root、顶层排除项与 `limits.scan_depth` 读取和巡检；使用上节 `upgrade` 显式转换后再启用 v2 设置，不能把两套规则同时当作活动来源。
+
+v2 主机可用 `collect` 前台常驻采集，由宿主管理进程生命周期（本工具不安装开机服务、不派生后台进程）：
+
+```sh
+python3 /skill目录/tools/steward.py collect --state /本机状态            # 持续采集，SIGTERM 在批次边界停止
+python3 /skill目录/tools/steward.py collect --state /本机状态 --once     # 只采一批，验证配置与本机耗时
+python3 /skill目录/tools/steward.py samples --state /本机状态            # 最近十分钟有界历史
+```
+
+采集按批次读取 `host.json`，配置变化在批次边界切换并新开运行记录；配置无效时暂停采集、显式记录缺口与心跳，历史仍可用 `samples`/`status` 读取（报告标明 `policy_source=last_valid_collector_run` 与当前配置错误，该归档预算只供读取，不授予采集、维护或升级授权）。`samples` 与 `status` 不等待巡检锁；分页用 `--since/--until` 固定窗口加 `--before`，`--output` 把本页完整原始事实导出到状态区外。来源失败保留原始异常；GPU、电源、TCP 状态与模型占用不在常驻来源内，以 `not_observed` 报告，需要时用 `patrol` 的单轮观测补齐。
 
 允许写说明或回收的目录还需配置 `directory_id`：运行 `python3 /skill目录/tools/steward.py status --state /本机状态 --path /约定目录`，在 `directory_index` 中找到 path 完全相同的行，取其 `id`（`dev:ino`）。缺少精确行时先补观测。临时内容回收还需 `retention_days` 和 `recycle_bytes`；工具按修改时间判断期限，任务是否结束、依赖是否解除由执行者现场核对。
 
@@ -95,9 +118,11 @@ python3 /skill目录/tools/steward.py backup --state /本机状态 --output /外
 
 ## 预算与指导更新
 
-初始预算来自 skill 目录的 `state/host.example.json`，仅 `init` 读取；运行时使用本机 `host.json.limits`。预算分别限制扫描条数、时间与深度，进程采样与命令读取，状态容量、工具输出，以及变化、采样和操作记录的条数与保留窗口。`file_bytes` 限制普通状态文件和数据库单条 JSON 记录，例如一项资源、一份文件元数据或一项操作。完整 current、inventory、operations 的读取与编码使用 `total_bytes` 上限，整份 baseline 不再受旧单文件上限约束。
+初始预算来自 skill 目录的 `state/host.example.json`，仅 `init` 读取；运行时使用本机 `host.json.limits`。v2 的逐 root 深度不在 `limits` 中，扫描的条目与时间预算、进程采样与命令读取、状态容量、工具输出，以及变化、采样和操作记录的条数与保留窗口仍由 `limits` 限制；`sampling` 单独描述后续连续采样的节奏与历史条数。`file_bytes` 限制普通状态文件和数据库单条 JSON 记录，例如一项资源、一份文件元数据或一项操作。完整 current、inventory、operations 的读取与编码使用 `total_bytes` 上限，整份 baseline 不再受旧单文件上限约束。
 
 整个状态区受 `total_bytes` 限制，包含数据库、事务日志、迁移临时库和保留的旧 JSON。数据库可长期写入的上限还要为回滚日志留空间，因此会小于 `total_bytes`；`status` 与 `patrol` 的 `capacity` 给出上限与当前余量，判断是否继续写入或调整采集范围时读它。容量不足时写入被拒绝并保留上次已提交状态，`migrate` 会在发布前按实际数据停下。数据库有页和索引开销，体积未必小于 JSON；观察后续轮次时，结合记录条数、覆盖范围与实际状态占用判断增长原因。
+
+续扫进度的候选记录、分配字节与基线记录都按单个对象逐条保存，`file_bytes` 只约束单条记录，不随文件数增长；队列、边界等字段仍留在单个 snapshot 行内，queue 随目录数增长，超大目录树要把目录数计入估算。容量估算要把两份记录一起算：文件数 × 每文件记录体积（路径、id、size、mtime 与 birth，通常约 150–250 字节）× 2（未完成 pass 的候选进度与上一份基线并存），再加目录摘要、变化与采样记录，以及约为 JSON 1.5–2 倍的 SQLite 页和索引开销与回滚日志余量。例如 9000 个文件、路径约 100 字节时，两份记录约 3–4 MiB，默认 `total_bytes` 的 4 MiB 在完成写入时容易不足；按本机约定核对后可提高 `total_bytes`，或缩小观察范围、减少保留记录，工具不会自动提高预算。巡检写入因容量被拒时事务整体回滚，上次基线与续扫进度保留，下一轮从同一进度重试并报告同一容量原因，直到调整预算或范围。
 
 结合硬件容量、磁盘读写、前台负载和实际巡检开销调整预算；`total_bytes` 属于本机约定，达到限制时先看 `capacity` 与采集范围，再决定是否请用户确认新的预算。
 
