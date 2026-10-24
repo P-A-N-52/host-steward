@@ -56,8 +56,9 @@
 - `steward.py` 目录索引查找与旧行过滤：已做。预建 `rules_by_path` 并按 root 预分组旧 `directory_index`；5000 目录 + 5000 旧行 + 20 条规则由 5.4-6.1ms 降至 2.5-2.8ms；500 组随机快照对比输出一致，本地 480 项与 K6 回归无新增失败。
 - `files.excluded_by_path`（`tools/files.py:106-116`）：已做。利用排除项已校验为规范相对路径，直接用 `relative == value` 或 `relative.startswith(value + os.sep)` 匹配，去掉逐次 `Path(...).parts`；5000 路径 × 20 排除项由 181ms 降至 31ms。验证：15000 组随机路径/排除项新旧结果一致；本地 480 项与 K6 回归无新增失败；实机临时状态配置 `exclude_paths=["skip","a/b"]` 后扫描未计入被排除内容。
 - `observe.parse_processes`（`tools/observe.py:84-103`）：已做。每进程只算一次 basename 与 `started`，resident 匹配和 identity 复用；500 进程 × 20 条常驻规则 3.9ms → 0.9ms。验证：500 组随机进程行与常驻规则新旧输出一致；本地 480 项与 K6 回归无新增失败；实机常驻 `Kimi Code` 命中并返回 `protection=shell`。
+- `policy.excluded_by_rule`（`tools/policy.py`）：已做。排除项匹配改用规范相对路径字符串前缀，保留名称排除逻辑；5000 条目 × 20 排除项 185ms → 45ms。验证：10 万次随机路径/排除项对比新旧一致；新增组件边界测试；本地 494 项与 K6 回归无新增失败；实机规范路径调查成功、被排除路径被拒绝。
 
 ## 约束
 
 - 任何优化不改变正式 CLI 的可观察行为，除非单独说明并更新测试。
-- 先测再改；改完跑 480 项测试与 K6 回归；提交前 `git diff --check`。
+- 先测再改；改完跑完整测试套件与 K6 回归；提交前 `git diff --check`。

@@ -17,7 +17,8 @@ from investigate import inspect_target
 from maintain import quarantine, restore
 from observe import observe
 from policy import (DEFAULT_SAMPLING, convert_v1_policy, new_root,
-                    policy_digest, read_policy_with_evidence, root_rule, validate)
+                    policy_digest, read_policy_with_evidence, root_rule, validate,
+                    excluded_by_rule)
 from state import StewardError, decode
 from state_schema import read_current, validate_scope
 from steward import initialize, patrol
@@ -278,6 +279,16 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(snapshot["excluded"]["configured"], 2)
         self.assertIn("排除 名称.txt", snapshot["scope"]["exclude_names"])
         self.assertEqual(snapshot["scope"]["exclude_paths"], ["build/cache"])
+
+    def test_excluded_by_rule_matches_path_components(self):
+        rule = {"path": str(self.root), "exclude_names": ["cache"],
+                "exclude_paths": ["build/output"]}
+        self.assertTrue(excluded_by_rule(rule, str(self.root / "build" / "output")))
+        self.assertTrue(excluded_by_rule(rule, str(self.root / "build" / "output" / "x")))
+        self.assertFalse(excluded_by_rule(rule, str(self.root / "build" / "output2")))
+        self.assertFalse(excluded_by_rule(rule, str(self.root / "build")))
+        self.assertTrue(excluded_by_rule(rule, str(self.root / "cache" / "x")))
+        self.assertFalse(excluded_by_rule(rule, str(self.root)))
 
     def test_missing_or_non_directory_root_is_gap_without_deletion(self):
         (self.root / "keep").write_text("keep")

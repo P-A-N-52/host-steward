@@ -118,8 +118,7 @@ def excluded_by_rule(rule, path):
     if any(part in rule["exclude_names"] for part in parts):
         return True
     for excluded in rule["exclude_paths"]:
-        prefix = Path(excluded).parts
-        if parts[:len(prefix)] == prefix:
+        if relative == excluded or relative.startswith(excluded + os.sep):
             return True
     return False
 
