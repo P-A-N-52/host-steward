@@ -46,6 +46,17 @@
    - 只影响 JSON 长度，收益低。
    - 状态：不做。
 
+8. **baseline 目录摘要逐记录重复解析路径**（`tools/baseline.py:611-646`）
+   - `_derive_directories` 对每条记录先 `Path(path).parent` 再可能 `Path(path).name`；候选记录跨轮累积，每轮巡检重复解析全量。
+   - 预期：循环内一次 `os.path.split(path)`；实测 20k 条记录 117ms → 21ms。
+   - 风险：记录路径来自 `scandir`、无尾分隔符，`os.path.split` 与 `Path.parent/.name` 等价；硬链接归属依赖的排序不变。
+   - 状态：待试。
+
+其他勘察候选（仅存档，未安排）：
+- `steward.py:552-558`：按目录线性查 `directory_rules`、按 root 反复过滤 `directory_index`，可改字典/预分组；5000 目录 × 20 规则实测 3.6ms → 0.42ms。
+- `files.excluded_by_path`（`tools/files.py:106-116`）：每条目重复 `Path(value).parts`，可每轮预计算排除前缀；仅配置 `exclude_paths` 时有收益。
+- `observe.parse_processes`（`tools/observe.py:95-98`）：每条 resident 规则重复 basename、字段拼接两次；绝对收益仅几毫秒/轮。
+
 ## 约束
 
 - 任何优化不改变正式 CLI 的可观察行为，除非单独说明并更新测试。
