@@ -235,18 +235,23 @@ def event_rebuild_gap(events, previous):
     return None
 
 
+def _event_reason(events):
+    if not events.get("available"):
+        return "unavailable"
+    if events.get("history_invalid"):
+        return "history_invalid"
+    if events.get("cursor_pending"):
+        return "cursor_pending"
+    if not events.get("history_complete") and not events.get("baseline"):
+        return "history_incomplete"
+    return None
+
+
 def event_gap(events):
     if events.get("source") != "macos_fsevents":
         return None
-    if not events.get("available"):
-        return {"kind": "events", "reason": "unavailable"}
-    if events.get("history_invalid"):
-        return {"kind": "events", "reason": "history_invalid"}
-    if events.get("cursor_pending"):
-        return {"kind": "events", "reason": "cursor_pending"}
-    if not events.get("history_complete") and not events.get("baseline"):
-        return {"kind": "events", "reason": "history_incomplete"}
-    return None
+    reason = _event_reason(events)
+    return {"kind": "events", "reason": reason} if reason else None
 
 
 def _root_rules(policy):
@@ -306,12 +311,8 @@ def degrade_event_clues(state, events, now, previous_events=None):
     elif events.get("baseline"):
         old = previous_events or {}
         reason = "baseline_rebuild" if type(old.get("cursor")) is int else None
-    elif events.get("cursor_pending"):
-        reason = "cursor_pending"
-    elif not events.get("history_complete") and not events.get("baseline"):
-        reason = "history_incomplete"
     else:
-        reason = None
+        reason = _event_reason(events)
     recheck.degrade(state, reason, now)
     return state
 
