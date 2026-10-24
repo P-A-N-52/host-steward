@@ -548,14 +548,18 @@ def patrol(store, policy, discard_scan_progress=False, discard_event_recheck=Fal
         history = list(previous.get("pending_history", []))
         history_dropped = previous.get("pending_history_dropped", 0) + max(0, len(history) - PENDING_HISTORY_LIMIT)
         history = history[-PENDING_HISTORY_LIMIT:]
+        rules_by_path = {rule["path"]: rule for rule in policy["directory_rules"]}
+        previous_index = {}
+        for row in previous.get("directory_index", []):
+            previous_index.setdefault(row["root"], []).append(row)
         directory_index = []
         for root, snapshot in snapshots.items():
-            old_rows = [row for row in previous.get("directory_index", []) if row["root"] == root]
+            old_rows = previous_index.get(root, [])
             if not snapshot["complete"] and old_rows:
                 directory_index.extend(dict(row, complete=False, stale=True) for row in old_rows)
                 continue
             for path, row in snapshot["directories"].items():
-                rule = next((rule for rule in policy["directory_rules"] if rule["path"] == path), None)
+                rule = rules_by_path.get(path)
                 directory_index.append(dict(path=path, root=root, id=row["id"], bytes=row["bytes"],
                                             files=row["files"], directories=row["directories"], agents=row["agents"],
                                             purpose=rule["purpose"] if rule else "unknown", measured_at=now,
