@@ -52,10 +52,10 @@
    - 验证：200 组随机目录树（含 AGENTS.md、硬链接同 inode、深度边界、多类型记录）新旧输出完全一致；定向 31 项、本地 480 项通过；K6 仍仅 3 个已知平台假设失败；实机临时状态巡检的目录计数、字节与 AGENTS.md 归属符合预期。
    - 状态：已做。
 
-其他勘察候选（仅存档，未安排）：
-- `steward.py:552-558`：按目录线性查 `directory_rules`、按 root 反复过滤 `directory_index`，可改字典/预分组；5000 目录 × 20 规则实测 3.6ms → 0.42ms。
-- `files.excluded_by_path`（`tools/files.py:106-116`）：每条目重复 `Path(value).parts`，可每轮预计算排除前缀；仅配置 `exclude_paths` 时有收益。
-- `observe.parse_processes`（`tools/observe.py:95-98`）：每条 resident 规则重复 basename、字段拼接两次；绝对收益仅几毫秒/轮。
+其他勘察候选：
+- `steward.py` 目录索引查找与旧行过滤：已做。预建 `rules_by_path` 并按 root 预分组旧 `directory_index`；5000 目录 + 5000 旧行 + 20 条规则由 5.4-6.1ms 降至 2.5-2.8ms；500 组随机快照对比输出一致，本地 480 项与 K6 回归无新增失败。
+- `files.excluded_by_path`（`tools/files.py:106-116`）：每条目重复 `Path(value).parts`，可每轮预计算排除前缀；仅配置 `exclude_paths` 时有收益。待试。
+- `observe.parse_processes`（`tools/observe.py:95-98`）：每条 resident 规则重复 basename、字段拼接两次；绝对收益仅几毫秒/轮。待试。
 
 ## 约束
 
