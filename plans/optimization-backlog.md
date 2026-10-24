@@ -33,8 +33,8 @@
 
 5. **测试专用生产分支**（`files.scan`、`policy.root_rule`、metadata 探测）
    - 生产不走的代码保留在 tools，增加维护面。
-   - 预期：减少产品代码；可能削弱独立对照测试。
-   - 状态：暂缓，先确认测试价值。
+   - 结论：不做。`files.scan` 是 `resumable_scan` 的独立语义参照，删除会削弱对照测试而不是降低生产复杂度；`policy.root_rule` 是小型读取辅助并有直接测试；metadata 探测仍有运行期用途。此前只移除了 patrol 中纯为测试替身保留的返回类型回退。
+   - 状态：评估后不做。
 
 6. **steward 扫描返回值兼容分支**（`tools/steward.py:471-477`）
    - `scan` 只转发 `resumable_scan`，后者所有返回路径都是 `(快照, 进度)`；patrol 里的 `isinstance(scanned, tuple)` 回退只服务返回 dict 的测试替身，并顺带沿用上一轮进度。
