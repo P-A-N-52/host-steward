@@ -15,10 +15,9 @@
    - 测量：1.45MB 数据集写入 38.86ms → 27.27ms（K6 ext4）。
 
 2. **resource_query 多段输出裁剪重复编码**（`tools/resource_query.py:549-771`）
-   - 每 pop 一条样本重编码整份报告，多个 `_compact_*` 串联。
-   - 预期：大窗口 `samples` 查询延迟下降。
-   - 风险：裁剪后的 JSON 形状可能变化，测试锁定输出。
-   - 状态：待 profile。
+   - 样本裁剪已从逐条 pop 改为二分保留条数；`detail/boundary/source/gap` 前置压缩段暂未动。
+   - 测量：120 样本、32/64/128KB 预算，`fit_history_output` 685.6ms → 142.1ms；样本裁剪段 121.9ms → 5.6ms；216 组真实报告 + 4735 组合成用例输出逐字节一致。
+   - 状态：已做；前置压缩仍可继续优化。
 
 3. **sample_store 按 run 缓存解码**（`tools/sample_store.py:624-625`）
    - 每条样本重复解码同一 run 的 policy/evidence。

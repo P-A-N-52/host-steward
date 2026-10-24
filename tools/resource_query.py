@@ -739,33 +739,68 @@ def fit_history_output(report, byte_limit):
             result["output_source_omitted"] = original_sources - len(result["sources"])
     if len(encode(result)) > byte_limit:
         _compact_boundary_change(result)
-    def _apply_sample_trim():
-        result["truncated"] = True
-        result["raw_count"] = len(result.get("samples") or [])
-        page = dict(result.get("page") or {})
-        page.update(returned=len(result.get("samples") or []), truncated=True,
-                    evaluated=result.get("evaluated_sample_count", evaluated))
-        result["page"] = page
-        summary = result.get("summary")
+    def _apply_sample_trim(target):
+        samples = target.get("samples") or []
+        target["truncated"] = True
+        target["raw_count"] = len(samples)
+        page = dict(target.get("page") or {})
+        page.update(returned=len(samples), truncated=True,
+                    evaluated=target.get("evaluated_sample_count", evaluated))
+        target["page"] = page
+        summary = target.get("summary")
         if isinstance(summary, dict):
-            summary["output_samples"] = len(result.get("samples") or [])
-        if result.get("samples"):
-            result["next_before"] = result["samples"][-1]["sample_id"]
-            result.pop("pagination_blocked_by_output", None)
+            summary = dict(summary)
+            summary["output_samples"] = len(samples)
+            target["summary"] = summary
+        if samples:
+            target["next_before"] = samples[-1]["sample_id"]
+            target.pop("pagination_blocked_by_output", None)
         else:
-            result["next_before"] = None
-            result["pagination_blocked_by_output"] = True
-            result["detail_scope"] = "本页样本未返回，游标未前进；用 --output 导出或提高输出预算"
+            target["next_before"] = None
+            target["pagination_blocked_by_output"] = True
+            target["detail_scope"] = "本页样本未返回，游标未前进；用 --output 导出或提高输出预算"
 
-    if len(encode(result)) > byte_limit:
-        while result.get("samples") and len(encode(result)) > byte_limit:
-            result["samples"].pop()
-            result["output_sample_omitted"] += 1
-            _apply_sample_trim()
-    if result["output_sample_omitted"]:
-        _apply_sample_trim()
-    if len(encode(result)) > byte_limit:
+    sample_count = len(result.get("samples") or [])
+    sample_omitted = result["output_sample_omitted"]
+
+    def _trimmed_candidate(keep, *, popped=True):
+        candidate = dict(result)
+        # 旧实现首次 pop 后 k>0 的 trim 会移除该键，k=0 时再追加到末尾。
+        if popped and sample_count > 1:
+            candidate.pop("pagination_blocked_by_output", None)
+        if sample_count:
+            candidate["samples"] = result["samples"][:keep]
+        candidate["output_sample_omitted"] = sample_omitted + sample_count - keep
+        _apply_sample_trim(candidate)
+        return candidate
+
+    fits = len(encode(result)) <= byte_limit
+    if fits:
+        if sample_omitted:
+            result = _trimmed_candidate(sample_count, popped=False)
+            fits = len(encode(result)) <= byte_limit
+    elif sample_count:
+        lower, upper = 0, sample_count - 1
+        best = None
+        while lower <= upper:
+            middle = (lower + upper) // 2
+            candidate = _trimmed_candidate(middle)
+            if len(encode(candidate)) <= byte_limit:
+                best = candidate
+                lower = middle + 1
+            else:
+                upper = middle - 1
+        if best is not None:
+            result = best
+            fits = True
+        else:
+            result = _trimmed_candidate(0)
+            fits = len(encode(result)) <= byte_limit
+    elif sample_omitted:
+        result = _trimmed_candidate(0, popped=False)
+        fits = len(encode(result)) <= byte_limit
+    if not fits:
         result = {"status": "output_limited", "message": "输出预算不足，请用 --output 导出或缩小查询范围"}
-    if len(encode(result)) > byte_limit:
-        result = {"output_limited": True}
+        if len(encode(result)) > byte_limit:
+            result = {"output_limited": True}
     return result
