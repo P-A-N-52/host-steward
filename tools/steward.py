@@ -756,6 +756,11 @@ def main():
     samples.add_argument("--process", help="精确进程 identity，不按 PID 拼接不同生命周期")
     samples.add_argument("--raw", action="store_true", help="保留本页完整原始事实与错误明细")
     samples.add_argument("--output", help="在状态区外独占创建本页完整 JSON；不受终端输出预算裁剪")
+    check = commands.add_parser("check", help="列出或运行本机约定授权的自定义检查脚本")
+    check.add_argument("--state", required=True)
+    selection = check.add_mutually_exclusive_group()
+    selection.add_argument("--name", help="运行指定名称的自定义检查")
+    selection.add_argument("--all", action="store_true", help="在 scan_seconds 总预算内依次运行全部检查")
     for action in ["patrol", "note", "quarantine", "restore", "track", "resolve", "status", "inventory", "inspect",
                    "migrate", "export", "backup", "upgrade"]:
         child = commands.add_parser(action)
@@ -844,6 +849,15 @@ def main():
             raise SystemExit(2)
         return
     store, policy = load(args.state)
+    if args.action == "check":
+        from custom_checks import check_report
+        report = check_report(policy, store.path, store.limits, name=args.name, run_all=args.all)
+        limit_bytes = store.limits["output_bytes"]
+        output_trimmed = len(encode(report)) > limit_bytes
+        emit(report, limit_bytes)
+        if output_trimmed or (report["status"] == "custom_check_results" and not report["complete"]):
+            raise SystemExit(2)
+        return
     if args.action == "collect":
         from collector import collect
         report = collect(store, once=args.once, mode="once" if args.once else "continuous")

@@ -12,6 +12,7 @@
   },
   "residents": [],
   "directory_rules": [],
+  "custom_checks": [],
   "limits": {
     "scan_entries": 5000,
     "scan_seconds": 3,

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 
 from files import canonical_path, is_canonical_path, within
 from state import StewardError, decode, read_regular_bytes
@@ -29,6 +30,12 @@ DEFAULT_SAMPLING = {
 }
 DEFAULT_MAX_DEPTH = 32
 DEFAULT_ROOT_EXCLUDE_NAMES = [".git", "__pycache__", ".demo", ".recycle"]
+CUSTOM_CHECK_FIELDS = frozenset(["name", "command", "purpose"])
+CUSTOM_CHECK_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+MAX_CUSTOM_CHECKS = 32
+MAX_CUSTOM_CHECK_ARGS = 16
+MAX_CUSTOM_CHECK_ARG_BYTES = 1024
+MAX_CUSTOM_CHECK_PURPOSE_BYTES = 512
 
 
 class PolicyDocument(dict):
@@ -57,6 +64,11 @@ def make_policy_evidence(policy, source_digest=None):
 def root_paths(policy):
     """按配置顺序返回 v1 字符串 root 或 v2 root 对象的路径。"""
     return [root["path"] if isinstance(root, dict) else root for root in policy.get("roots", [])]
+
+
+def custom_checks(policy):
+    """返回本机约定中的自定义检查；未配置时为空列表。"""
+    return list(policy.get("custom_checks", []))
 
 
 def root_rules(policy):
@@ -172,6 +184,36 @@ def _samefile_alias(first, second):
         return False
 
 
+def _validate_custom_checks(checks):
+    if not isinstance(checks, list):
+        raise StewardError("custom_checks 必须是数组")
+    if len(checks) > MAX_CUSTOM_CHECKS:
+        raise StewardError(f"custom_checks 最多配置 {MAX_CUSTOM_CHECKS} 项")
+    names = set()
+    for check in checks:
+        if not isinstance(check, dict) or set(check) != CUSTOM_CHECK_FIELDS:
+            raise StewardError("自定义检查需且仅需包含 name、command、purpose")
+        name = check["name"]
+        if not isinstance(name, str) or not CUSTOM_CHECK_NAME.fullmatch(name):
+            raise StewardError("自定义检查 name 必须是 1–64 字节的字母、数字、点、下划线或连字符，且以字母或数字开头")
+        if name in names:
+            raise StewardError(f"自定义检查 name 重复：{name}")
+        names.add(name)
+        purpose = check["purpose"]
+        if not isinstance(purpose, str) or not purpose.strip() \
+                or len(purpose.encode("utf-8")) > MAX_CUSTOM_CHECK_PURPOSE_BYTES:
+            raise StewardError("自定义检查 purpose 必须是非空短文本")
+        command = check["command"]
+        if not isinstance(command, list) or not 1 <= len(command) <= MAX_CUSTOM_CHECK_ARGS:
+            raise StewardError(f"自定义检查 command 必须是 1–{MAX_CUSTOM_CHECK_ARGS} 个参数的数组")
+        for argument in command:
+            if not isinstance(argument, str) or not argument or "\x00" in argument \
+                    or len(argument.encode("utf-8")) > MAX_CUSTOM_CHECK_ARG_BYTES:
+                raise StewardError("自定义检查 command 参数必须是非空字符串且不超过 1024 字节")
+        if not os.path.isabs(command[0]):
+            raise StewardError("自定义检查 command 首项必须是绝对路径，不使用 shell 或 PATH 查找")
+
+
 def _validate_roots(policy, version):
     configured = policy.get("roots", [])
     expected_type = str if version == 1 else dict
@@ -211,6 +253,7 @@ def validate(policy):
         raise StewardError("本机约定用途必须是字符串")
     version = policy["version"]
     _validate_limits(policy.get("limits", {}), LEGACY_LIMIT_FIELDS if version == 1 else LIMIT_FIELDS)
+    _validate_custom_checks(policy.get("custom_checks", []))
     if version == 1:
         _validate_exclude_names(policy.get("exclude_names"))
         if "sampling" in policy:

@@ -50,6 +50,7 @@ class RuntimeTests(unittest.TestCase):
                           "--purpose", "独立运行交付测试"]),
                 ("patrol", ["patrol", "--state", str(state)]),
                 ("status", ["status", "--state", str(state), "--path", str(root)]),
+                ("check", ["check", "--state", str(state)]),
                 ("record", ["inventory", "--state", str(state), "--record", str(record)]),
                 ("query", ["inventory", "--state", str(state), "--id", definition["id"]]),
             ]
@@ -63,6 +64,8 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(outputs["init"]["status"], "initialized")
             self.assertEqual(outputs["init"]["state"], str(state))
             self.assertIsNotNone(outputs["status"]["last_run"])
+            self.assertEqual(outputs["check"]["status"], "custom_checks")
+            self.assertEqual(outputs["check"]["count"], 0)
             self.assertIn(str(root), [row["path"] for row in outputs["status"]["directory_index"]])
             self.assertEqual(outputs["query"]["resources"][0]["definition"], definition)
             self.assertTrue((state / "guidance/patrol.md").is_file())

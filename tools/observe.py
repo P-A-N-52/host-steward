@@ -25,7 +25,15 @@ class CommandFailedError(StewardError):
         super().__init__(f"命令退出码 {returncode}：{name}\n{output.rstrip()}")
 
 
-def command(arguments, max_bytes=262144, timeout=3, input_bytes=None, metadata=None):
+class CommandOutputError(StewardError):
+    def __init__(self, name, output_bytes, max_bytes):
+        self.name = name
+        self.output_bytes = output_bytes
+        self.max_bytes = max_bytes
+        super().__init__(f"命令输出超过 {max_bytes} 字节：{name}")
+
+
+def command(arguments, max_bytes=262144, timeout=3, input_bytes=None, metadata=None, env=None):
     if metadata is not None and not isinstance(metadata, dict):
         raise TypeError("metadata 必须是字典或 None")
     name = " ".join(arguments)
@@ -35,7 +43,7 @@ def command(arguments, max_bytes=262144, timeout=3, input_bytes=None, metadata=N
         metadata["output_bytes"] = 0
     with subprocess.Popen(arguments, stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
-                          env=dict(os.environ, LC_ALL="C")) as process:
+                          env=dict(env) if env is not None else dict(os.environ, LC_ALL="C")) as process:
         try:
             if input_bytes is not None:
                 process.stdin.write(input_bytes)
@@ -55,7 +63,7 @@ def command(arguments, max_bytes=262144, timeout=3, input_bytes=None, metadata=N
                         if metadata is not None:
                             metadata["output_bytes"] = len(output)
                         if len(output) > max_bytes:
-                            raise StewardError(f"命令输出超过 {max_bytes} 字节：{name}")
+                            raise CommandOutputError(name, len(output), max_bytes)
             process.wait(timeout=max(0.001, deadline - time.monotonic()))
             text = output.decode("utf-8")
             if metadata is not None:
