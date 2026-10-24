@@ -48,9 +48,9 @@
 
 8. **baseline 目录摘要逐记录重复解析路径**（`tools/baseline.py:611-646`）
    - `_derive_directories` 对每条记录先 `Path(path).parent` 再可能 `Path(path).name`；候选记录跨轮累积，每轮巡检重复解析全量。
-   - 预期：循环内一次 `os.path.split(path)`；实测 20k 条记录 117ms → 21ms。
-   - 风险：记录路径来自 `scandir`、无尾分隔符，`os.path.split` 与 `Path.parent/.name` 等价；硬链接归属依赖的排序不变。
-   - 状态：待试。
+   - 已做：循环内一次 `os.path.split(path)`；20k 条记录 116ms → 23ms（约 5×）。
+   - 验证：200 组随机目录树（含 AGENTS.md、硬链接同 inode、深度边界、多类型记录）新旧输出完全一致；定向 31 项、本地 480 项通过；K6 仍仅 3 个已知平台假设失败；实机临时状态巡检的目录计数、字节与 AGENTS.md 归属符合预期。
+   - 状态：已做。
 
 其他勘察候选（仅存档，未安排）：
 - `steward.py:552-558`：按目录线性查 `directory_rules`、按 root 反复过滤 `directory_index`，可改字典/预分组；5000 目录 × 20 规则实测 3.6ms → 0.42ms。
