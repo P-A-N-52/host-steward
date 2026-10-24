@@ -510,17 +510,34 @@ class Database:
             sections.append((_path_json(path), path, kind, entries))
         return "object", sections
 
-    def _entry_json(self, value):
+    def _entry_json_with_size(self, value):
         payload = _json(value)
-        if self.file_limit is not None and len(payload.encode("utf-8")) > self.file_limit:
+        size = len(payload.encode("utf-8"))
+        if self.file_limit is not None and size > self.file_limit:
             raise DatabaseError("SQLite 单条状态记录超过容量上限")
-        return payload
+        return payload, size
+
+    def _entry_json(self, value):
+        return self._entry_json_with_size(value)[0]
 
     def _replace_dataset(self, connection, dataset, data):
-        encoded_size = len(_json(data).encode("utf-8"))
-        if self.total_limit is not None and encoded_size > self.total_limit:
-            raise DatabaseError("动态状态数据集超过总容量预算")
         root_kind, desired = self._sections(dataset, data)
+        prepared = []
+        encoded_size = 0
+        for section, _, kind, entries in desired:
+            new_rows = {}
+            for key, position, value in entries:
+                payload, size = self._entry_json_with_size(value)
+                new_rows[(key, position)] = payload
+                encoded_size += size
+            prepared.append((section, kind, new_rows))
+        if self.total_limit is not None:
+            if encoded_size > self.total_limit:
+                raise DatabaseError("动态状态数据集超过总容量预算")
+            if encoded_size > self.total_limit * 0.9:
+                # 行级累计不含节名与结构开销；接近上限时回退整份编码精确判定。
+                if len(_json(data).encode("utf-8")) > self.total_limit:
+                    raise DatabaseError("动态状态数据集超过总容量预算")
         connection.execute(
             "INSERT INTO datasets(dataset, root_kind) VALUES (?, ?) "
             "ON CONFLICT(dataset) DO UPDATE SET root_kind=excluded.root_kind "
@@ -534,7 +551,7 @@ class Database:
         for section, key, position, value in connection.execute(
                 "SELECT section, item_key, position, value_json FROM rows WHERE dataset=?", (dataset,)):
             existing[section][key, position] = value
-        for ordinal, (section, _, kind, entries) in enumerate(desired):
+        for ordinal, (section, kind, new_rows) in enumerate(prepared):
             if section in old_sections:
                 if old_sections[section] != (kind, ordinal):
                     connection.execute("UPDATE sections SET kind=?, ordinal=? WHERE dataset=? AND section=?",
@@ -543,7 +560,6 @@ class Database:
                 connection.execute("INSERT INTO sections(dataset, section, kind, ordinal) VALUES (?, ?, ?, ?)",
                                    (dataset, section, kind, ordinal))
             old_rows = existing[section]
-            new_rows = {(key, position): self._entry_json(value) for key, position, value in entries}
             connection.executemany(
                 "DELETE FROM rows WHERE dataset=? AND section=? AND item_key=? AND position=?",
                 [(dataset, section, key, position) for key, position in old_rows.keys() - new_rows.keys()])
