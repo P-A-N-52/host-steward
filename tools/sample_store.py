@@ -293,12 +293,19 @@ class SampleStore:
         return {"status": "already_stopped" if already else "stopped", "run": run}
 
     def append_sample(self, run_id, *, observed_at, monotonic_at, boot, host, sources,
-                      processes=None, sampling):
+                      processes=None, sampling, state_detail=None,
+                      last_complete_at=None):
         run_id = self._key(run_id, "run_id")
         observed_at = _timestamp(observed_at, "observed_at")
         monotonic_at = _timestamp(monotonic_at, "monotonic_at", allow_none=True)
         if not isinstance(host, dict):
             raise DatabaseError("host 必须是对象")
+        if state_detail is not None:
+            if not isinstance(state_detail, dict):
+                raise DatabaseError("采集状态明细必须是对象")
+            self._entry(state_detail, "采集状态明细")
+        if last_complete_at is not None:
+            last_complete_at = _timestamp(last_complete_at, "state.last_complete_at")
         sources = self._validate_sources(sources)
         records, hours, process_budget = self._sampling(sampling)
         host_json = self._entry(host, "host 样本")
@@ -381,8 +388,15 @@ class SampleStore:
                     "detail_json=excluded.detail_json, updated_at=excluded.updated_at",
                     (name, None if available is None else int(available), attempted,
                      success, error_at, error_json, detail_json, observed_at))
-            self._upsert_state(connection, run_id=run_id, heartbeat_at=observed_at,
-                               stopped_at=None)
+            state_fields = {"run_id": run_id, "heartbeat_at": observed_at,
+                            "stopped_at": None}
+            if state_detail is not None:
+                detail = dict(state_detail)
+                detail["sample_id"] = sample_id
+                state_fields["detail"] = detail
+            if last_complete_at is not None:
+                state_fields["last_complete_at"] = last_complete_at
+            self._upsert_state(connection, **state_fields)
             self._prune_auxiliary(connection, observed_at)
             retention = self._retention_stats(
                 connection, sample_id, observed_at, records, hours, expired_by_age,

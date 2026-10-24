@@ -985,15 +985,9 @@ class Collector:
                 if reboot:
                     boot_event = self._boot_transition_locked(
                         boot, observed_at, summary)
-                append = self.samples.append_sample(
-                    self._run_id, observed_at=observed_at,
-                    monotonic_at=monotonic_at, boot=boot, host=host,
-                    sources=sources, processes=processes,
-                    sampling=self._policy_state.sampling)
                 state_detail = self._detail(
                     "running", sample_status=cycle_status,
                     complete=complete, usable=True,
-                    sample_id=append.get("sample_id"),
                     failed_sources=result.get("failed_sources", [])[:16],
                     not_attempted_sources=result.get("not_attempted_sources", [])[:16],
                     budget_exhausted=bool(result.get("budget_exhausted")),
@@ -1003,10 +997,13 @@ class Collector:
                     last_success_at=observed_at if complete else self._last_committed_observed_at,
                     boot_event=boot_event,
                     **schedule)
-                fields = {"heartbeat_at": observed_at, "detail": state_detail}
-                if complete:
-                    fields["last_complete_at"] = observed_at
-                self.samples.update_state(**fields)
+                self.samples.append_sample(
+                    self._run_id, observed_at=observed_at,
+                    monotonic_at=monotonic_at, boot=boot, host=host,
+                    sources=sources, processes=processes,
+                    sampling=self._policy_state.sampling,
+                    state_detail=state_detail,
+                    last_complete_at=observed_at if complete else None)
         except StewardError as exc:
             if _is_lock_busy(exc):
                 start_at = (self._open_sample_gap
