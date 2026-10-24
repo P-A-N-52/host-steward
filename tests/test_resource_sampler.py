@@ -11,7 +11,6 @@ sys.path.insert(0, str(PROJECT / "tools"))
 
 import linux_observe as linux
 import observe
-import resource_sampler as sampler
 from policy import make_policy_evidence
 from resource_sampler import (
     DarwinBudgetExceeded,

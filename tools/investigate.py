@@ -132,6 +132,7 @@ def reference_search(target, policy, store, budget, self_paths=()):
 
     for rule in root_rules(policy):
         root = rule["path"]
+        coverage_boundaries.setdefault(root, 0)
         before = len(budget.gaps) + budget.omitted_gaps
         checked = False
         try:

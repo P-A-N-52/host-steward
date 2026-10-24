@@ -55,6 +55,16 @@ def _context_order(item):
     return _CONTEXT_PRIORITY.get(item[0], 10)
 
 
+def _context_text(value, state, text_limit):
+    text, truncated, omitted = _clip_text(
+        value, min(text_limit, max(0, state["remaining"] - 32)))
+    if truncated:
+        state["truncated"] = True
+        text = text + f"（省略 {omitted} 字节）" if omitted and "省略" not in text else text
+    _spend(state, len(text.encode("utf-8")) + 8)
+    return text
+
+
 def _context_value(value, *, depth, state, text_limit, max_items, max_depth):
     if value is None or isinstance(value, bool):
         _spend(state, 8)
@@ -63,13 +73,7 @@ def _context_value(value, *, depth, state, text_limit, max_items, max_depth):
         _spend(state, 16)
         return value
     if isinstance(value, str):
-        allowed = min(text_limit, max(0, state["remaining"] - 32))
-        text, truncated, omitted = _clip_text(value, allowed)
-        if truncated:
-            state["truncated"] = True
-            text = text + f"（省略 {omitted} 字节）" if omitted and "省略" not in text else text
-        _spend(state, len(text.encode("utf-8")) + 8)
-        return text
+        return _context_text(value, state, text_limit)
     if depth >= max_depth:
         state["truncated"] = True
         _spend(state, 40)
@@ -116,12 +120,7 @@ def _context_value(value, *, depth, state, text_limit, max_items, max_depth):
             state["truncated"] = True
             _spend(state, 24)
         return result
-    text, truncated, omitted = _clip_text(str(value), min(text_limit, max(0, state["remaining"] - 32)))
-    if truncated:
-        state["truncated"] = True
-        text = text + f"（省略 {omitted} 字节）" if omitted and "省略" not in text else text
-    _spend(state, len(text.encode("utf-8")) + 8)
-    return text
+    return _context_text(str(value), state, text_limit)
 
 
 def _context_summary(value, *, byte_limit=CONTEXT_BYTE_LIMIT,
@@ -419,7 +418,7 @@ def _boundary_report(store, page, since, until, process, view):
         return result
     old = dict(predecessor, processes=view(predecessor))
     new = dict(oldest, processes=view(oldest))
-    change = resource_changes(old, new, page["gaps"])
+    change = resource_changes(old, new, page["gaps"], page.get("gap_history"))
     predecessor_at = predecessor.get("observed_at")
     in_window = type(predecessor_at) in (int, float) and math.isfinite(predecessor_at) \
         and (since is None or predecessor_at >= since)
@@ -448,7 +447,8 @@ def history_report(store, *, minutes=10, since=None, until=None,
     for previous, current in zip(chronological, chronological[1:]):
         previous = dict(previous, processes=_process_view(previous, process))
         current = dict(current, processes=_process_view(current, process))
-        changes[current["sample_id"]] = resource_changes(previous, current, page["gaps"])
+        changes[current["sample_id"]] = resource_changes(
+            previous, current, page["gaps"], page.get("gap_history"))
     discontinuities = [change for change in changes.values()
                        if not change["continuity"]["comparable"]]
     busy = []
@@ -584,6 +584,14 @@ def _compact_output_details(result):
                 if item.get(key) is not None:
                     item[key] = _error_summary(item[key])
                     changed = True
+    history = result.get("gap_history")
+    if isinstance(history, dict):
+        compact = _selected(history, ("retention_hours", "complete_since",
+                                      "count_limit", "count_limited"))
+        if compact != history:
+            result["gap_history"] = compact
+            result["gap_history_trimmed"] = True
+            changed = True
     return changed
 
 

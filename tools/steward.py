@@ -2,7 +2,6 @@
 """供本地 agent 直接调用的 macOS/Linux 单轮工具入口。"""
 
 import argparse
-import json
 import math
 import os
 from pathlib import Path
@@ -17,14 +16,12 @@ from files import canonical_path, compare, within
 from events import read_events
 import recheck
 from observe import command, observe, sample_facts
-from policy import (LEGACY_LIMIT_FIELDS, LIMIT_FIELDS, make_policy_evidence, new_root, policy_digest,
+from policy import (LIMIT_FIELDS, make_policy_evidence, new_root, policy_digest,
                     read_policy_with_evidence, root_paths, validate as validate_policy)
 from state import PolicyChangedError, Store, StewardError, decode, encode, read_regular_bytes
 from state_schema import read_current, read_operations
 
 PROJECT = Path(__file__).resolve().parent.parent
-
-# LIMIT_FIELDS 对应当前 v2 模板，LEGACY_LIMIT_FIELDS 单独保留 v1 读取契约。
 
 
 def scan(progress, limits, roots, exclude_names=(), state_path=None, recheck=None):
@@ -263,6 +260,8 @@ def apply_event_clues(state, policy, events, now, state_path=None, previous_even
     """把本轮事件路径线索并入待复核队列；线索不直接生成变化。"""
     rules = _root_rules(policy)
     recheck.prune_roots(state, [rule["path"] for rule in rules])
+    # source_truncated 描述本轮来源截断，不是队列状态；每轮重新计算。
+    state["source_truncated"] = False
     if events.get("source") != "macos_fsevents":
         # 没有可核对的平台事件来源时，旧线索不能冒充当前事件覆盖。
         recheck.clear(state, "snapshot_only", now)
@@ -472,6 +471,8 @@ def patrol(store, policy, discard_scan_progress=False, discard_event_recheck=Fal
                                         policy.get("exclude_names", ()), str(store.path), recheck_targets)
         events = finalize_events(events, previous, snapshots, roots)
         event_recheck = degrade_event_clues(event_recheck, events, now, previous.get("events"))
+        # 先取本轮摘要：consume 会移除已覆盖条目，不能让它抹掉本轮线索截断信号。
+        queue_summary = recheck.summary(event_recheck)
         consume_recheck(event_recheck, snapshots)
         gap = event_gap(events)
         if gap:
@@ -485,7 +486,6 @@ def patrol(store, policy, discard_scan_progress=False, discard_event_recheck=Fal
         delta = compare(baselines, snapshots, policy["limits"]["change_records"])
         comparison_gaps = preserve_incomplete_comparison_gaps(previous, snapshots, delta["comparison_gaps"])
         coverage_scope = {}
-        queue_summary = recheck.summary(event_recheck)
         for root, snapshot in snapshots.items():
             coverage = {"scope": snapshot.get("scope"), "excluded": snapshot.get("excluded", {}),
                         "complete": snapshot["complete"]}

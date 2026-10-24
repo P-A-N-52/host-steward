@@ -326,6 +326,16 @@ class InventoryTests(unittest.TestCase):
         reference_search(str(self.target), self.policy, self.store, budget)
         self.assertLessEqual(budget.bytes, 4)
 
+    def test_reference_scan_depth_zero_counts_boundary_without_crashing(self):
+        nested = self.root / "nested"
+        nested.mkdir()
+        (nested / "inside.conf").write_text(str(self.target))
+        self.policy["roots"][0]["max_depth"] = 0
+        report = reference_search(str(self.target), self.policy, self.store,
+                                  Budget(self.policy["limits"]))
+        self.assertEqual(report["root_coverage"][0]["depth_boundaries"], 1)
+        self.assertTrue(report["root_coverage"][0]["complete_within_declared_filters"])
+
     def test_fifo_is_gap_and_outside_target_is_rejected(self):
         fifo = self.root / "pipe.conf"
         os.mkfifo(fifo)

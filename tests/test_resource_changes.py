@@ -79,6 +79,16 @@ class ResourceChangesTests(unittest.TestCase):
         for gap in [{"start_at": 990, "end_at": 1000}, {"start_at": 1010, "end_at": None}]:
             self.assertTrue(resource_changes(before, after, [gap])["continuity"]["comparable"])
 
+    def test_gap_history_before_complete_since_blocks_rates(self):
+        before, after = self.pair()
+        result = resource_changes(before, after, (),
+                                  {"complete_since": 1005})
+        self.assertIn("gap_history_incomplete", result["continuity"]["reasons"])
+        self.assertNotIn("cpu", result)
+        late = resource_changes(before, after, (),
+                                {"complete_since": 990})
+        self.assertTrue(late["continuity"]["comparable"])
+
     def test_clock_jump_and_nonincreasing_time_do_not_produce_rates(self):
         before, after = self.pair()
         after["observed_at"] += 60

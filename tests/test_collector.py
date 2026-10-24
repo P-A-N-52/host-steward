@@ -444,6 +444,37 @@ class CollectorTests(unittest.TestCase):
         sample = second.samples.query(None, None)["samples"][0]
         self.assertGreaterEqual(sample["observed_at"], stopped[-1]["end_at"])
 
+    def test_wall_clock_rollback_closes_open_gap_by_identity(self):
+        collector = make_collector(self.store, self.clock, self.sampler,
+                                   policy=self.policy)
+        self.sampler.on_call = stop_on_sampler_call(
+            {"collector": collector}, 1)
+        collector.run()
+        gaps = collector.samples.query(None, None)["gaps"]
+        open_gap = [gap for gap in gaps
+                    if gap["reason"] == "collector_stopped" and gap["ongoing"]]
+        self.assertEqual(len(open_gap), 1)
+        first_start = open_gap[0]["start_at"]
+
+        self.clock.jump_wall(-3600)
+        second_sampler = FakeSampler(self.clock)
+        second = make_collector(self.store, self.clock, second_sampler,
+                                policy=self.policy,
+                                run_id_counter={"value": 1})
+        summary = second.run(once=True)
+        self.assertEqual(summary["startup"]["closed_open_gap_count"], 1)
+        self.assertTrue(summary["startup"]["closed_open_gaps"][0]
+                        ["wall_clock_regression"])
+        self.assertEqual(second.samples.status()["open_gap_count"], 0)
+        stopped = [gap for gap in second.samples.query(None, None)["gaps"]
+                   if gap["reason"] == "collector_stopped"]
+        self.assertEqual(len(stopped), 1)
+        self.assertFalse(stopped[0]["ongoing"])
+        self.assertEqual(stopped[0]["start_at"], stopped[0]["end_at"])
+        self.assertLess(stopped[0]["end_at"], first_start)
+        self.assertTrue(stopped[0]["detail"]["wall_clock_regression"])
+        self.assertEqual(stopped[0]["detail"]["raw_start_at"], first_start)
+
     def test_unclean_restart_records_gap_and_boot_change(self):
         samples = SampleStore(self.store)
         old_policy = make_policy(purpose="old")
@@ -716,6 +747,21 @@ class CollectorTests(unittest.TestCase):
         self.assertFalse(failed[0]["ongoing"])
         self.assertIn("Traceback", failed[0]["detail"]["source_errors"][0]["traceback"])
         self.assertEqual(collector.samples.query(None, None)["samples"], [])
+
+    def test_small_file_bytes_bounds_gap_detail_and_keeps_collector_alive(self):
+        policy = make_policy(limits={"file_bytes": 1024,
+                                     "total_bytes": 8 * 1024 * 1024})
+        sampler = FakeSampler(self.clock, all_failed=True)
+        collector = make_collector(self.store, self.clock, sampler,
+                                   policy=policy)
+        summary = collector.run(once=True)
+        self.assertEqual(summary["status"], "failed")
+        gaps = collector.samples.query(None, None)["gaps"]
+        failed = [gap for gap in gaps if gap["reason"] == "sample_unavailable"]
+        self.assertEqual(len(failed), 1)
+        self.assertTrue(failed[0]["detail"]["truncated"])
+        self.assertLessEqual(len(json.dumps(failed[0]["detail"],
+                                            ensure_ascii=False).encode()), 1024)
 
     def test_storage_failure_stops_writes_and_raises_original_error(self):
         collector = make_collector(self.store, self.clock, self.sampler,

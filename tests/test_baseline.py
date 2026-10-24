@@ -204,6 +204,21 @@ class BaselineTests(unittest.TestCase):
         self.assertGreater(completion[roots[0]], completion[roots[1]])
         self.assertGreater(completion[roots[2]], completion[roots[1]])
 
+    def test_first_root_exhausting_budget_keeps_next_index(self):
+        first = self.base / "first"
+        second = self.base / "second"
+        for index in range(4):
+            self.write(first / f"f{index}.txt")
+            self.write(second / f"f{index}.txt")
+        roots = [str(first), str(second)]
+        limits = self.limits(entries=4)
+        snapshots, progress = resumable_scan(None, roots, limits)
+        self.assertTrue(snapshots[roots[0]]["complete"])
+        self.assertFalse(snapshots[roots[1]]["complete"])
+        self.assertEqual(progress.get("next_index"), 1)
+        snapshots, progress = resumable_scan(progress, roots, limits)
+        self.assertTrue(snapshots[roots[1]]["complete"])
+
     def test_scope_change_invalidates_progress_and_reports_reason(self):
         inner = self.root / "inner"
         for index in range(4):
@@ -733,6 +748,32 @@ class PatrolBaselineTests(unittest.TestCase):
         current = read_current(self.store)
         self.assertEqual(current["scan_progress"], {})
         self.assertIn(root, current["baselines"])
+
+    def progress_with_out_of_root(self, field, value):
+        self.policy["limits"]["scan_entries"] = 1
+        self.store.write("host.json", self.policy)
+        self.write(self.root / "data" / "file.txt")
+        self.run_patrol()
+        current = copy.deepcopy(read_current(self.store))
+        entry = current["scan_progress"][str(self.root)]
+        if field == "queue":
+            entry["queue"].append(value)
+        else:
+            entry["records"][str(self.base / "outside.txt")] = value
+        self.store.write("current.json", current)
+        return current
+
+    def test_scan_progress_rejects_out_of_root_queue(self):
+        self.progress_with_out_of_root(
+            "queue", {"path": str(self.base), "depth": 0, "cursor": None})
+        with self.assertRaisesRegex(StewardError, "scan_progress"):
+            self.run_patrol()
+
+    def test_scan_progress_rejects_out_of_root_records(self):
+        self.progress_with_out_of_root(
+            "records", {"id": "outside", "kind": "file", "size": 1, "mtime": 1})
+        with self.assertRaisesRegex(StewardError, "scan_progress"):
+            self.run_patrol()
 
     def test_patrol_discard_scan_progress_rebuilds_without_touching_baselines(self):
         for index in range(12):

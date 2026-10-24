@@ -183,7 +183,6 @@ def consume(state, covered):
         state["truncated"] = False
         state["aggregated"] = 0
         state["dropped"] = 0
-        state["source_truncated"] = False
     return removed
 
 

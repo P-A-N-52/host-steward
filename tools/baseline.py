@@ -54,7 +54,7 @@ def _strictly_under(path, parent):
     return path != parent and files.within(path, parent)
 
 
-def _new_entry(root, root_id, scope, gaps=None, recheck_done=None):
+def _new_entry(root, root_id, scope, gaps=None):
     return {
         "root_id": root_id,
         "scope": scope,
@@ -70,7 +70,7 @@ def _new_entry(root, root_id, scope, gaps=None, recheck_done=None):
         "gaps": list(gaps or ()),
         "vanished": [],
         "recheck_failed": [],
-        "recheck_done": dict(recheck_done or {}),
+        "recheck_done": {},
         "recheck_active": {},
         "recheck_pending": {},
     }
@@ -122,6 +122,9 @@ def _check_entry(root, entry):
     if not isinstance(records, dict):
         raise ValueError(f"scan_progress 中 {root} 的 records 必须是对象")
     for path, record in records.items():
+        if not isinstance(path, str) or not os.path.isabs(path) \
+                or os.path.normpath(path) != path or not files.within(path, root):
+            raise ValueError(f"scan_progress 中 {root} 的记录越过 root：{str(path)[:300]}")
         _check_record(f"scan_progress 中 {root}", path, record)
     allocated = entry.get("allocated", {})
     if not isinstance(allocated, dict) or any(not isinstance(value, int) or value < 0
@@ -132,8 +135,11 @@ def _check_entry(root, entry):
         raise ValueError(f"scan_progress 中 {root} 的待扫队列为空，无法接续；"
                          "如进度已损坏，可用 patrol --discard-scan-progress 清除后重建")
     for item in queue:
-        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
-            raise ValueError(f"scan_progress 中 {root} 的待扫目录条目无效")
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str) \
+                or not os.path.isabs(item["path"]) \
+                or os.path.normpath(item["path"]) != item["path"] \
+                or not files.within(item["path"], root):
+            raise ValueError(f"scan_progress 中 {root} 的待扫目录条目无效或越过 root")
         if type(item.get("depth")) is not int or item["depth"] < 0:
             raise ValueError(f"scan_progress 中 {root} 的待扫目录深度无效")
         cursor = item.get("cursor")
@@ -411,7 +417,7 @@ def _mark_recheck_done(entry, target, token):
     entry.setdefault("recheck_active", {}).pop(target, None)
 
 
-def _finalize_recheck(entry, root, targets):
+def _finalize_recheck(entry, targets):
     """复核子树已排空后核对目录身份与时间，并记录完成标记。"""
     for target, token in targets.items():
         if any(_in_subtree(item["path"], target) for item in entry["queue"]):
@@ -474,7 +480,7 @@ def _settle_recheck(entry, rule, active, path):
     finished = {target: token for target, token in candidates.items()
                 if not any(_in_subtree(item["path"], target) for item in entry["queue"])}
     if finished:
-        _finalize_recheck(entry, root, finished)
+        _finalize_recheck(entry, finished)
 
 
 def _scan_queue(rule, root_info, entry, budget, state_path, active=None):
@@ -702,7 +708,7 @@ def _serve_root(rule, entry, budget, state_path, old_entries, current_roots, req
         else ({}, [])
     round_gaps = _scan_queue(rule, root_info, entry, budget, state_path, active)
     if active:
-        _finalize_recheck(entry, root, active)
+        _finalize_recheck(entry, active)
     summary = _recheck_summary(entry, requested, skipped) if requested else None
     entry["excluded"] = _excluded_totals(entry)
     entry["boundaries"] = _persisted_boundaries(entry)
@@ -819,6 +825,8 @@ def resumable_scan(progress, roots, limits, exclude_names=(), state_path=None, r
             served[root] = _unserved_snapshot(rule, entries.get(root), configured_state_path,
                                               requested.get(root))
     remaining = {root: entry for root, entry in entries.items() if entry is not None}
-    if remaining:
+    if remaining or stop_index is not None:
+        # 首个 root 恰好用尽预算并完成时 entries 为空，仍要保存下一轮起点，
+        # 否则后续 root 永远轮不到。
         remaining["next_index"] = stop_index if stop_index is not None else first
     return {rule["path"]: served[rule["path"]] for rule in rules}, remaining

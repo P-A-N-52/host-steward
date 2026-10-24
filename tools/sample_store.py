@@ -401,7 +401,7 @@ class SampleStore:
             retention = self._retention_stats(
                 connection, sample_id, observed_at, records, hours, expired_by_age,
                 evicted_by_count, cutoff)
-            self._set_retention(connection, retention)
+            self._upsert_state(connection, retention=retention)
             stats = self._database_stats(connection, self.store.database_path)
             state = self._read_state(connection)
         return {"status": "appended", "sample_id": sample_id, "run_id": run_id,
@@ -691,6 +691,8 @@ class SampleStore:
                 for sample in samples:
                     sample["processes"] = grouped.get(sample["sample_id"], [])
             gaps = self._gaps(connection, since, until, budget)
+            gap_count, oldest_gap_start = connection.execute(
+                "SELECT COUNT(*), MIN(start_at) FROM collector_gaps").fetchone()
             state = self._read_state(connection, budget)
             latest_run = self._latest_run(connection, state, budget)
             active_run = self._active_run(connection, state, budget)
@@ -701,6 +703,19 @@ class SampleStore:
             sources = self._sources(connection, budget)
             stats = self._database_stats(connection, self.store.database_path)
         life = self._lifecycle(state, active_run, latest_run, now)
+        reference = until if until is not None else now
+        complete_since = reference - GAP_RETENTION_HOURS * 3600
+        count_limited = gap_count >= GAP_LIMIT
+        if count_limited and oldest_gap_start is not None:
+            # 条数淘汰只保留最老的已关闭缺口；再早的区间可能已经缺记录。
+            complete_since = max(complete_since, oldest_gap_start)
+        gap_history = {
+            "retention_hours": GAP_RETENTION_HOURS,
+            "complete_since": complete_since,
+            "count_limit": GAP_LIMIT,
+            "count_limited": count_limited,
+            "semantics": "缺口早于 complete_since 可能已淘汰；该时间前无缺口不等于连续",
+        }
         latest_processes["within_window"] = (
             latest_processes["observed_at"] is not None
             and (since is None or latest_processes["observed_at"] >= since))
@@ -713,6 +728,7 @@ class SampleStore:
             "page": {"limit": limit, "returned": len(samples),
                      "truncated": truncated},
             "gaps": gaps,
+            "gap_history": gap_history,
             "latest_processes": latest_processes,
             "collector": {
                 "status": life["status"], "status_reason": life["status_reason"],
@@ -782,9 +798,6 @@ class SampleStore:
             "stopped_at=excluded.stopped_at, detail_json=excluded.detail_json",
             (merged["run_id"], merged["heartbeat_at"], merged["last_complete_at"],
              merged["stopped_at"], detail_json))
-
-    def _set_retention(self, connection, retention):
-        self._upsert_state(connection, retention=retention)
 
     def _run_from_row(self, row):
         policy = _decode(row[7], "运行配置证据")
@@ -991,6 +1004,46 @@ class SampleStore:
             })
             result[source] = item
         return result
+
+    def close_gap(self, gap_id, end_at, *, detail=None):
+        """按 gap_id 关闭 open 缺口；墙钟回拨时把区间压到关闭点并保留原始时间。
+
+        按时间区间查找在回拨后会匹配不到原缺口，导致缺口永久保持 open。
+        """
+        if type(gap_id) is not int or gap_id <= 0:
+            raise DatabaseError("gap_id 必须是正整数")
+        end_at = _timestamp(end_at, "gap end_at")
+        detail_json = None if detail is None else self._entry(detail, "gap 明细")
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT start_at, end_at, detail_json FROM collector_gaps WHERE gap_id=?",
+                (gap_id,)).fetchone()
+            if row is None:
+                raise DatabaseError(f"缺口记录不存在：{gap_id}")
+            old_start, old_end, old_detail_json = row
+            if old_end is not None:
+                return self._gap(connection, gap_id)
+            new_start = min(old_start, end_at)
+            new_end = max(new_start, end_at)
+            if old_detail_json is not None:
+                old_detail = _decode(old_detail_json, "缺口明细")
+                if detail is None:
+                    detail_json = old_detail_json
+                elif isinstance(old_detail, dict) and isinstance(detail, dict):
+                    merged = dict(old_detail)
+                    merged.update(detail)
+                    try:
+                        detail_json = self._entry(merged, "gap 明细")
+                    except DatabaseError:
+                        # 合并后的明细超预算时保留原明细，关闭动作不能因此失败。
+                        detail_json = old_detail_json
+                else:
+                    detail_json = old_detail_json
+            connection.execute(
+                "UPDATE collector_gaps SET start_at=?, end_at=?, detail_json=?, updated_at=? "
+                "WHERE gap_id=?", (new_start, new_end, detail_json, end_at, gap_id))
+            self._prune_auxiliary(connection, end_at, protect_gap_id=gap_id)
+            return self._gap(connection, gap_id)
 
     def _find_gap(self, connection, start_at, end_at, reason, run_id):
         if end_at is None:

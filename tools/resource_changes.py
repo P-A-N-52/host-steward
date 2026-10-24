@@ -39,7 +39,7 @@ def _counter_delta(before, after, fields):
     return {key: after[key] - before[key] for key in fields}, None
 
 
-def _continuity(before, after, gaps):
+def _continuity(before, after, gaps, gap_history=None):
     reasons = []
     if not before.get("run_id") or before.get("run_id") != after.get("run_id"):
         reasons.append("run_changed")
@@ -64,6 +64,10 @@ def _continuity(before, after, gaps):
             if _number(gap_start) and gap_start < end and (gap_end is None or (_number(gap_end) and gap_end > start)):
                 reasons.append("collection_gap")
                 break
+        if isinstance(gap_history, dict):
+            complete_since = gap_history.get("complete_since")
+            if _number(complete_since) and start < complete_since:
+                reasons.append("gap_history_incomplete")
     return {"comparable": not reasons, "reasons": reasons, "interval_seconds": interval}
 
 
@@ -293,8 +297,8 @@ def _processes(before, after, interval):
                          "不完整 topN/部分枚举只比较重叠身份，缺失对象不推断启动或退出"}
 
 
-def resource_changes(before, after, gaps=()):
-    continuity = _continuity(before, after, gaps)
+def resource_changes(before, after, gaps=(), gap_history=None):
+    continuity = _continuity(before, after, gaps, gap_history)
     result = {"from": before.get("observed_at"), "to": after.get("observed_at"), "continuity": continuity}
     if not continuity["comparable"]:
         return result

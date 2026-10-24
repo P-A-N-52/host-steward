@@ -234,12 +234,31 @@ class SampleStoreTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertIn("process_samples_identity_idx", indexes)
+        gap_history = first["gap_history"]
+        self.assertEqual(gap_history["retention_hours"],
+                         sample_store.GAP_RETENTION_HOURS)
+        self.assertFalse(gap_history["count_limited"])
+        self.assertAlmostEqual(
+            gap_history["complete_since"],
+            BASE + 3 - sample_store.GAP_RETENTION_HOURS * 3600)
+
         with self.assertRaises(DatabaseError):
             self.samples.query(BASE, BASE, limit=0)
         with self.assertRaises(DatabaseError):
             self.samples.query(BASE, BASE, limit=201)
         with self.assertRaises(DatabaseError):
             self.samples.query(BASE + 1, BASE)
+
+    def test_gap_history_marks_count_pruning_boundary(self):
+        with patch.object(sample_store, "GAP_LIMIT", 2), \
+                patch.object(sample_store, "GAP_RETENTION_HOURS", 1):
+            for index in range(3):
+                self.samples.record_gap(BASE + 100 + index,
+                                        BASE + 101 + index, f"g{index}")
+            page = self.samples.query(None, BASE + 200)
+        history = page["gap_history"]
+        self.assertTrue(history["count_limited"])
+        self.assertGreaterEqual(history["complete_since"], BASE + 100)
 
     def test_latest_process_snapshot_is_not_empty_when_not_sampled(self):
         first = self.append(0, processes=[{"identity": "p1", "rss_bytes": 10}])

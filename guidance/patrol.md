@@ -36,7 +36,7 @@ python3 /skill目录/tools/steward.py samples --state /本机状态 --since A --
 python3 /skill目录/tools/steward.py samples --state /本机状态 --raw --output /外部目录/本页.json              # 本页完整原始事实
 ```
 
-返回按时间倒序；`summary` 只统计本页样本，`boundary` 用窗外前驱说明页首变化的可比性；进程、网卡、磁盘的 top-N 截断视野用 `entered/left_bounded_snapshot` 表达，不称启动或消失。默认未载入进程历史时标 `process_changes_not_loaded`。`--output` 导出不受终端输出预算裁剪；预算裁剪到无样本时报告 `pagination_blocked_by_output` 并以非零退出，不把空结果当作查询成功。
+返回按时间倒序；`summary` 只统计本页样本，`boundary` 用窗外前驱说明页首变化的可比性；进程、网卡、磁盘的 top-N 截断视野用 `entered/left_bounded_snapshot` 表达，不称启动或消失。默认未载入进程历史时标 `process_changes_not_loaded`。`gap_history.complete_since` 是缺口记录可能完整的起点；早于该点的相邻样本不判连续，`continuity.reasons` 会带 `gap_history_incomplete`，不能把“没有缺口记录”当作连续。缺口按时间与条数淘汰，查询窗口越界时以该字段为准。`--output` 导出不受终端输出预算裁剪；预算裁剪到无样本时报告 `pagination_blocked_by_output` 并以非零退出，不把空结果当作查询成功。
 
 定时调用 `patrol` 可加 `--quiet`，工具仅在本轮 `observations_changed` 为真时输出，表示文件变化、新基线，或扫描、比较、整机观测缺口的出现与消失。是否值得维护和通知由 agent 判断；即使命令静默，也要查看既有待核验事项及按任务需要查询 samples 等观测。
 

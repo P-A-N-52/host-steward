@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 import platform
 import sys
@@ -98,6 +97,18 @@ class CustomCheckTests(unittest.TestCase):
         self.assertEqual(result["format"], "text")
         self.assertIn("NaN", result["output"])
 
+    def test_lone_surrogate_json_falls_back_to_text_without_crashing(self):
+        command = self.script("surrogate",
+                              "print('{\"value\": \"\\\\ud800\"}')\n")
+        policy = self.policy([{"name": "surrogate", "command": command,
+                               "purpose": "孤立代理项"}])
+        report = check_report(policy, self.state, LIMITS, name="surrogate")
+        result = report["checks"][0]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["format"], "text")
+        self.assertIn("\\ud800", result["output"])
+        json.dumps(report, ensure_ascii=False).encode("utf-8")
+
     def test_nonzero_exit_is_reported_as_failed_with_output(self):
         command = self.script("fail", "import sys\nprint('needs attention')\nsys.exit(4)\n")
         policy = self.policy([{"name": "fail", "command": command, "purpose": "失败输出"}])
@@ -115,6 +126,19 @@ class CustomCheckTests(unittest.TestCase):
         limits = dict(LIMITS, scan_seconds=1)
         started = time.monotonic()
         result = check_report(policy, self.state, limits, name="slow")["checks"][0]
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(result["status"], "timeout")
+        self.assertIn("1", result["reason"])
+
+    def test_wait_timeout_is_reported_as_timeout(self):
+        command = self.script("closed-stdout",
+                              "import os, time\nos.close(1)\ntime.sleep(5)\n")
+        policy = self.policy([{"name": "closed-stdout", "command": command,
+                               "purpose": "关闭 stdout 后挂起"}])
+        limits = dict(LIMITS, scan_seconds=1)
+        started = time.monotonic()
+        result = check_report(policy, self.state, limits,
+                              name="closed-stdout")["checks"][0]
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual(result["status"], "timeout")
         self.assertIn("1", result["reason"])

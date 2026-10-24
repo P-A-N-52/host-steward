@@ -100,6 +100,11 @@ def _compact_boot(value):
             if key in value}
 
 
+def _detail_size(value):
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                          allow_nan=False).encode("utf-8"))
+
+
 def _bounded_detail(detail, limit):
     try:
         payload = json.dumps(detail, ensure_ascii=False, separators=(",", ":"),
@@ -109,7 +114,7 @@ def _bounded_detail(detail, limit):
     raw = payload.encode("utf-8")
     if len(raw) <= limit:
         return detail
-    return {
+    summary = {
         "phase": detail.get("phase"),
         "truncated": True,
         "original_bytes": len(raw),
@@ -121,6 +126,14 @@ def _bounded_detail(detail, limit):
         "not_attempted_sources": (detail.get("not_attempted_sources") or [])[:16],
         "message": f"采集状态明细超过 {limit} 字节，已省略完整 traceback 与重复列表",
     }
+    for candidate in (summary, {"truncated": True,
+                                "message": f"采集状态明细超过 {limit} 字节"}):
+        try:
+            if _detail_size(candidate) <= limit:
+                return candidate
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return None
 
 
 @contextmanager
@@ -239,7 +252,9 @@ class Collector:
 
     @staticmethod
     def _detail_limit_for(limits):
-        return max(2048, min(65536, int(limits.get("file_bytes", 65536)) // 2))
+        # 状态明细最终由 file_bytes 硬约束；预算必须小于等于该上限，
+        # 不能因为最小 traceback 预留而反过来超过它。
+        return max(1, min(65536, int(limits.get("file_bytes", 65536)) // 2))
 
     def _apply_runtime_policy(self, state):
         """让 Store/SampleStore 的实际写入预算与当前有效 policy 一致。"""
@@ -322,6 +337,19 @@ class Collector:
         }
         detail.update(fields)
         return _bounded_detail(detail, limit)
+
+    def _gap_detail(self, detail):
+        """缺口明细与状态记录共用 file_bytes 上限；超限时保留摘要而不是拒绝缺口。"""
+        if detail is None:
+            return None
+        limit = self.store.limits.get("file_bytes", 65536)
+        if type(limit) is not int or limit <= 0:
+            return detail
+        bounded = _bounded_detail(detail, limit)
+        if bounded is not None:
+            return bounded
+        compact = {"truncated": True, "message": f"缺口明细超过 {limit} 字节"}
+        return compact if _detail_size(compact) <= limit else None
 
     def _source_error_summary(self, result):
         errors = []
@@ -695,13 +723,14 @@ class Collector:
         for gap in page.get("gaps", []):
             if not gap.get("ongoing"):
                 continue
-            start_at, end_at, extra = _gap_times(gap.get("start_at"), started_at)
-            self.samples.record_gap(
-                start_at, end_at, gap.get("reason"), run_id=gap.get("run_id"),
+            _, _, extra = _gap_times(gap.get("start_at"), started_at)
+            closed = self.samples.close_gap(
+                gap.get("gap_id"), started_at,
                 detail={"closed_by": "collector_start", **extra})
             startup["closed_open_gaps"].append({
                 "reason": gap.get("reason"), "run_id": gap.get("run_id"),
-                "start_at": gap.get("start_at"),
+                "start_at": gap.get("start_at"), "end_at": closed["end_at"],
+                "wall_clock_regression": bool(extra.get("wall_clock_regression")),
             })
         startup["closed_open_gap_count"] = len(startup["closed_open_gaps"])
         startup["closed_open_gaps"] = startup["closed_open_gaps"][:16]
@@ -813,8 +842,9 @@ class Collector:
                     self._open_config_gap, None)
                 self.samples.record_gap(
                     start_at, end_at, "config_error", run_id=self._run_id,
-                    detail={"error": detail,
-                            "config_since": self._open_config_gap, **extra})
+                    detail=self._gap_detail({
+                        "error": detail,
+                        "config_since": self._open_config_gap, **extra}))
                 self.samples.update_state(
                     heartbeat_at=wall_now, detail=state_detail)
         except StewardError as lock_error:
@@ -852,7 +882,7 @@ class Collector:
                     self._open_sample_gap, None)
                 self.samples.record_gap(
                     start_at, end_at, "sample_unavailable", run_id=self._run_id,
-                    detail={"error": detail, **extra})
+                    detail=self._gap_detail({"error": detail, **extra}))
                 self.samples.update_state(
                     heartbeat_at=wall_now, detail=state_detail)
         except StewardError as lock_error:
@@ -890,11 +920,12 @@ class Collector:
                 self.samples.record_gap(
                     start_at, end_at, "sample_unavailable",
                     run_id=self._run_id,
-                    detail={"failed_sources": result.get("failed_sources", [])[:16],
-                            "not_attempted_sources": result.get("not_attempted_sources", [])[:16],
-                            "source_errors": self._source_error_summary(result),
-                            "budget_exhausted": bool(result.get("budget_exhausted")),
-                            **extra})
+                    detail=self._gap_detail({
+                        "failed_sources": result.get("failed_sources", [])[:16],
+                        "not_attempted_sources": result.get("not_attempted_sources", [])[:16],
+                        "source_errors": self._source_error_summary(result),
+                        "budget_exhausted": bool(result.get("budget_exhausted")),
+                        **extra}))
                 self.samples.update_state(
                     heartbeat_at=observed_at, detail=state_detail)
         except StewardError as lock_error:

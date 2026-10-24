@@ -84,6 +84,12 @@ def command(arguments, max_bytes=262144, timeout=3, input_bytes=None, metadata=N
                 os.killpg(process.pid, 9)
             except ProcessLookupError:
                 pass  # 进程组已自行退出。
+            if isinstance(exc, subprocess.TimeoutExpired):
+                # subprocess.TimeoutExpired 不是 TimeoutError 子类；统一成
+                # 调用方约定的超时异常，避免超时路径变成未捕获 traceback。
+                converted = TimeoutError(f"命令超过 {timeout:g} 秒：{name}")
+                converted.output_bytes = read_bytes
+                raise converted from exc
             raise
         finally:
             process.wait()

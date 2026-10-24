@@ -26,18 +26,16 @@ def timestamp_seconds(value):
     return number(value) and -10**12 <= value <= 10**12
 
 
-def object_field(data, key, name, default=None):
+def object_field(data, key, name):
     if key not in data:
-        return {} if default is None else default
+        return {}
     require(isinstance(data[key], dict), name, f"{key} 必须是对象")
     return data[key]
 
 
 def list_field(data, key, name):
-    if key not in data:
-        return []
-    require(isinstance(data[key], list), name, f"{key} 必须是数组")
-    return data[key]
+    if key in data:
+        require(isinstance(data[key], list), name, f"{key} 必须是数组")
 
 
 def valid_path(value):
@@ -193,7 +191,8 @@ def validate_scan_progress(progress, name):
                 name, f"scan_progress {root} 缺少 root_id")
         validate_scope(entry.get("scope"), root, name)
         for path, record in object_field(entry, "records", name).items():
-            require(isinstance(path, str) and isinstance(record, dict), name, f"scan_progress {root} 的记录无效")
+            require(valid_path(path) and within(path, root) and isinstance(record, dict),
+                    name, f"scan_progress {root} 的记录无效或越过 root")
             require(isinstance(record.get("id"), str) and isinstance(record.get("kind"), str),
                     name, f"scan_progress {root} 记录身份无效")
             require(integer(record.get("size")) and record["size"] >= 0 and integer(record.get("mtime")),
@@ -206,8 +205,9 @@ def validate_scan_progress(progress, name):
                 f"scan_progress {root} 的待扫队列为空或无效；"
                 "如进度已损坏，可用 patrol --discard-scan-progress 清除后重建")
         for item in queue:
-            require(isinstance(item, dict) and isinstance(item.get("path"), str),
-                    name, f"scan_progress {root} 的待扫目录条目无效")
+            require(isinstance(item, dict) and valid_path(item.get("path"))
+                    and within(item["path"], root),
+                    name, f"scan_progress {root} 的待扫目录条目无效或越过 root")
             require(integer(item.get("depth")) and item["depth"] >= 0,
                     name, f"scan_progress {root} 的待扫目录深度无效")
             require(item.get("cursor") is None or isinstance(item.get("cursor"), str),

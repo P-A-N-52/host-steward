@@ -6,7 +6,7 @@ import time
 
 from observe import CommandFailedError, CommandOutputError, command
 from policy import custom_checks
-from state_io import StewardError, decode
+from state_io import StewardError, decode, encode
 
 
 def _executable_available(path):
@@ -33,6 +33,12 @@ def _shape_output(text, limit):
     if not truncated:
         try:
             parsed = decode(text)
+            if isinstance(parsed, (dict, list)):
+                # JSON 里的孤立代理项能被 json.loads 接受，但无法按 UTF-8
+                # 写入报告；退回文本，保留原始转义而不是让整次检查崩溃。
+                encode(parsed)
+        except UnicodeEncodeError:
+            parsed = None
         except (ValueError, TypeError, RecursionError):
             parsed = None
     if isinstance(parsed, (dict, list)):

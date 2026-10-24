@@ -204,6 +204,14 @@ class PatrolRecheckTests(unittest.TestCase):
         self.assertNotIn("event_recheck", report)
         self.assertIsNone(read_current(self.store)["event_recheck"]["degraded"])
 
+    def test_source_truncated_survives_full_coverage_in_summary(self):
+        target = self.write(self.root / "data" / "file.txt")
+        self.run_patrol()
+        target.write_bytes(b"changed")
+        report = self.run_patrol(self.event([str(target)], paths_truncated=True))
+        summary = report["coverage_scope"][str(self.root)]["event_recheck"]
+        self.assertTrue(summary["source_truncated"])
+
     def test_replayed_event_with_budget_cut_completes_recheck(self):
         data = self.root / "data"
         for index in range(8):

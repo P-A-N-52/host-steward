@@ -12,7 +12,6 @@ GPU、服务、电源与 TCP 状态不在首个常驻里程碑内，结果中以
 """
 
 import os
-from pathlib import Path
 import platform
 import inspect
 import re
@@ -143,7 +142,7 @@ def _traceback_limit(policy):
     return min(8192, max(2048, value // 32))
 
 
-def _status_for(section, attempted_at, finished_at, extra=None):
+def _status_for(section, attempted_at, finished_at):
     status = {
         "available": section.get("available"),
         "attempted_at": attempted_at,
@@ -162,8 +161,6 @@ def _status_for(section, attempted_at, finished_at, extra=None):
                 "unavailable_count"):
         if key in section:
             status[key] = section[key]
-    if extra:
-        status.update(extra)
     return status
 
 
@@ -187,16 +184,7 @@ def _budget_host(source, exc):
     }
 
 
-def _not_attempted_host(source, after, reason):
-    return {
-        "available": False,
-        "reason": f"budget_not_attempted：共享采集预算已在 {after} 耗尽（{reason}）",
-        "source": source,
-        "budget_not_attempted": True,
-    }
-
-
-def _not_attempted_status(source, after, reason):
+def _not_attempted(source, after, reason):
     return {
         "available": False,
         "reason": f"budget_not_attempted：共享采集预算已在 {after} 耗尽（{reason}）",
@@ -295,7 +283,6 @@ class DarwinBudgetRunner:
         self.started_at = self._clock()
         self.deadline = self.started_at + seconds
         self.used_bytes = 0
-        self.calls = 0
 
     @property
     def remaining_seconds(self):
@@ -339,7 +326,6 @@ class DarwinBudgetRunner:
                 read_bytes = 0
             self.used_bytes += read_bytes
             raise
-        self.calls += 1
         read_bytes = metadata.get("output_bytes")
         if type(read_bytes) is not int or read_bytes < 0:
             read_bytes = getattr(text, "output_bytes", None)
@@ -362,8 +348,8 @@ def _linux_sample(policy, sampling, *, process_due, wall, monotonic,
 
     def attempt(name, function, label):
         if blocked["source"] is not None:
-            host[name] = _not_attempted_host(label, blocked["source"], blocked["reason"])
-            sources[name] = _not_attempted_status(label, blocked["source"], blocked["reason"])
+            host[name] = _not_attempted(label, blocked["source"], blocked["reason"])
+            sources[name] = _not_attempted(label, blocked["source"], blocked["reason"])
             return None
         attempted_at = wall()
         try:
@@ -555,8 +541,8 @@ def _darwin_sample(policy, sampling, *, process_due, wall, monotonic,
 
     def attempt(name, function, label):
         if blocked["source"] is not None:
-            host[name] = _not_attempted_host(label, blocked["source"], blocked["reason"])
-            sources[name] = _not_attempted_status(label, blocked["source"], blocked["reason"])
+            host[name] = _not_attempted(label, blocked["source"], blocked["reason"])
+            sources[name] = _not_attempted(label, blocked["source"], blocked["reason"])
             return None
         attempted_at = wall()
         try:
@@ -639,9 +625,9 @@ def _darwin_sample(policy, sampling, *, process_due, wall, monotonic,
                 sources[name] = _status_for(section, attempted_at, finished_at)
     else:
         for name in ("cpu", "diskio"):
-            host[name] = _not_attempted_host("iostat -c 2", blocked["source"],
+            host[name] = _not_attempted("iostat -c 2", blocked["source"],
                                              blocked["reason"])
-            sources[name] = _not_attempted_status("iostat -c 2", blocked["source"],
+            sources[name] = _not_attempted("iostat -c 2", blocked["source"],
                                                   blocked["reason"])
 
     attempt("memory", lambda: _darwin_memory_section(runner),
@@ -673,7 +659,7 @@ def _darwin_sample(policy, sampling, *, process_due, wall, monotonic,
     return host, sources, processes
 
 
-def _boot_identity(value):
+def boot_identity(value):
     if isinstance(value, dict):
         if value.get("available") is False:
             return None
@@ -684,14 +670,9 @@ def _boot_identity(value):
     return value
 
 
-def boot_identity(value):
-    """返回可用于连续性比较的开机身份；不可用或缺失时为 None。"""
-    return _boot_identity(value)
-
-
 def boot_changed(before, after):
     """仅当两侧都有开机身份且不同才判定为重开机。"""
-    old, new = _boot_identity(before), _boot_identity(after)
+    old, new = boot_identity(before), boot_identity(after)
     return old is not None and new is not None and old != new
 
 
@@ -706,10 +687,9 @@ def boot_summary(section):
     return result
 
 
-def sample_boot(policy, *, system=None, wall_clock=None, monotonic=None,
+def sample_boot(policy, *, system=None, monotonic=None,
                 linux_source=None, command_runner=None):
     """启动前轻量读取开机身份，成功时返回可入库的 boot 摘要。"""
-    wall_clock = wall_clock or time.time
     monotonic = monotonic or time.monotonic
     system = system or platform.system()
     sampling = sampling_config(policy)
