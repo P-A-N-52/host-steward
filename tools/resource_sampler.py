@@ -448,9 +448,7 @@ def _darwin_memory_section(runner):
         "page_size": page_size,
         "counters": observe.parse_vm_counters(memory_text),
         "swap": dict(swap, available=True,
-                     semantics="used 是采样时点当前已分配/使用的 swap 量，"
-                               "不是历史高水位；当前压力结合 vm_stat 的 "
-                               "Swapins/Swapouts 差分判断"),
+                     semantics=observe.DARWIN_SWAP_SEMANTICS),
         "semantics": "counters 为 vm_stat 自开机原始计数：Pages* 键是页数"
                      "（字节 = 页数 × page_size），Pageins/Swapins/Compressions "
                      "等键是累计事件次数",

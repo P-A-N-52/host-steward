@@ -1099,6 +1099,8 @@ class CollectorTests(unittest.TestCase):
         sample = collector.samples.query(None, None)["samples"][0]
         self.assertTrue(sample["host"]["cpu"]["available"])
         self.assertTrue(sample["host"]["memory"]["available"])
+        self.assertIn("采样时点", sample["host"]["memory"]["swap"]["semantics"])
+        self.assertNotIn("累计高水位", sample["host"]["memory"]["swap"]["semantics"])
         self.assertTrue(sample["host"]["diskio"]["available"])
         self.assertTrue(sample["host"]["network"]["available"])
         self.assertTrue(sample["host"]["storage"]["available"])

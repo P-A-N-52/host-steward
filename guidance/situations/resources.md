@@ -12,6 +12,8 @@ CPU 结合持续时间、任务进展和前台体验判断。`ps` 百分比采�
 
 每项指标保留来源、单位、时间口径和可用性。单位不明或与任务明显矛盾时，先标为待验证，补查后再用于计算或处置。
 
+Linux 的内存计数器逐字段单位见 `memory.units`：`bytes` 表示来源 kB 已乘 1024；`count` 表示来源无单位计数（例如 `HugePages_Total/Free/Rsvd/Surp`），保持原值；其他单位（例如 `Odd: 7 MB`）不换算，保留来源数值与单位。`memory.source_units` 保留原始单位文本，`memory.platform_gaps` 记录旧内核缺少 `MemAvailable` 等平台缺口，`patrol` 会把它们并入 `observation_gaps`。`patrol` 与常驻采集共用 `tools/linux_observe.py` 的同一 meminfo/swap 口径，同一字段在两条链路中的数值、单位与缺口解释一致。
+
 ## 看清怎么涨的
 
 主机级样本分两类，判断方法不同：

@@ -43,6 +43,19 @@ class PatrolSemanticsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def test_memory_platform_gaps_enter_observation_gaps(self):
+        host = {"system": "test", "architecture": "test", "cpu": {}, "gpu": {}, "model_usage": {},
+                "storage": [],
+                "memory": {"available": True, "platform_gaps": [
+                    {"field": "MemAvailable", "reason": "旧内核未提供 MemAvailable"}]},
+                "processes": {"available": True, "items": []},
+                "services": {"available": True, "items": []}}
+        with patch("steward.observe", return_value=host):
+            report = self.run_patrol()
+        self.assertIn({"kind": "memory", "field": "MemAvailable",
+                       "reason": "旧内核未提供 MemAvailable"}, report["observation_gaps"])
+        self.assertEqual(read_current(self.store)["observation_gaps"], report["observation_gaps"])
+
     def test_atomic_file_replacement_is_a_change_with_complete_coverage(self):
         target = self.root / "skill.md"
         target.write_text("旧版本")

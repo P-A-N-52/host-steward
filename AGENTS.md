@@ -37,7 +37,7 @@ python3 tools/steward.py check --state /本机状态          # 自定义检查�
 | `policy.py` | 本机约定 v1/v2 校验、规范路径、逐 root 范围规则、版本证据、显式转换与坏配置时的归档只读预算 |
 | `files.py`、`baseline.py`、`events.py` | 有界扫描、对象身份与 scope、跨轮续扫（持久进度、目录游标、多 root 公平轮转）、变化聚合与原生事件 |
 | `recheck.py` | 事件路径线索的待复核队列：路径归一、去重合并、父目录聚合、有界截断与退化记录 |
-| `observe.py`、`linux_observe.py` | 有预算的系统命令与 Linux proc/sysfs 来源采集 |
+| `observe.py`、`linux_observe.py` | 有预算的系统命令与 Linux proc/sysfs 来源采集；Linux meminfo 解析只在 `linux_observe`，`observe.py` 的 patrol 内存入口是薄适配器 |
 | `resource_sampler.py`、`collector.py` | 跨平台常驻批次采样（逐来源隔离、共享预算）与批次边界调度、热重载、缺口记账 |
 | `state_io.py`、`state.py`、`database.py`、`state_schema.py` | 共用编码与异常、状态文件、独立锁与 SQLite 存储、容量控制与结构校验 |
 | `sample_store.py` | 独立资源样本、来源、运行与缺口的增量存储和有限查询 |

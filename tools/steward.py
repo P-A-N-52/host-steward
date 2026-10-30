@@ -459,6 +459,10 @@ def patrol(store, policy, discard_scan_progress=False, discard_event_recheck=Fal
         host = observe(policy)
         observation_gaps = [{"kind": name, "reason": host[name].get("reason", "unavailable")}
                             for name in ["memory", "processes", "services"] if not host[name].get("available")]
+        # 平台缺口（例如旧内核没有 MemAvailable）不是采集失败，也要进入 agent 的固定告警通道。
+        for gap in (host.get("memory") or {}).get("platform_gaps") or []:
+            observation_gaps.append({"kind": "memory", "field": gap.get("field"),
+                                     "reason": gap.get("reason", "unavailable")})
         for item in host.get("storage", []):
             if not item.get("available"):
                 observation_gaps.append({"kind": "storage", "root": item.get("path"),
