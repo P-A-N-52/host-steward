@@ -69,11 +69,11 @@ python3 /skill目录/tools/steward.py check --state /本机状态 --name backup-
 | --- | --- |
 | `retention_hours`、`record_limit` | 本轮采用的时间与条数上限。 |
 | `expired_by_age` | 本轮因超过时间上限淘汰的条数。 |
-| `evicted_by_count` | 时间筛选后，本轮因条数上限淘汰的条数。 |
+| `evicted_by_count` | 时间筛选后，本轮因条数上限淘汰的条数。非零属正常滚动淘汰；与 `span_hours` 联读判断窗口是否被挤短。 |
 | `oldest_observed_at`、`newest_observed_at` | 现存变化记录最早、最晚的观察时间；空历史为 null。 |
-| `span_hours` | 上述两端的小时差；单条为 0，空历史为 null。它描述记录跨度，完整观察范围仍需结合巡检与缺口证据判断。 |
+| `span_hours` | 上述两端的小时差；单条为 0，空历史为 null。条数上限生效时会小于 `retention_hours`；它描述记录跨度，完整观察范围仍需结合巡检与缺口证据判断。 |
 
-两个淘汰数都只统计本轮，非零表示预算内的滚动保留行为。`change_records_dropped` 兼容旧调用，值等于 `evicted_by_count`；它不累计，也不包含到期淘汰。agent 结合历史是否足够支持当前工作决定下一步，状态写入失败与 `capacity.writable` 则单独核对。旧状态尚无 `change_retention` 时，`status` 返回 null，下一次成功巡检生成该摘要。
+两个淘汰数都只统计本轮：`expired_by_age` 是到期淘汰，`evicted_by_count` 是条数上限挤掉的、仍在保留期内的记录。稳态下只要持续有新增，`evicted_by_count` 每轮都会等于新增超出条数上限的部分，长期非零是正常的滚动淘汰，不累计、不表示数据丢失，也不能仅凭它非零判定异常；`change_records_dropped` 兼容旧调用，值等于 `evicted_by_count`，同样不含到期淘汰。判断实际窗口以 `span_hours`（或 `oldest_observed_at`/`newest_observed_at`）为准：`evicted_by_count>0` 且 `span_hours<retention_hours` 表示条数上限先于时间上限生效，声明窗口未达到；记录稀疏时跨度也会偏短，完整观察范围仍需结合巡检与缺口证据。需要单独核对的是状态写入失败、`capacity.writable` 与覆盖缺口，而不是淘汰数量本身；agent 结合历史是否足够支持当前工作决定下一步。旧状态尚无 `change_retention` 时，`status` 返回 null，下一次成功巡检生成该摘要。
 
 agent 用 `track` 登记需要跨轮跟进的事项，说明判断依据、未知项和下一步；相同 key 更新说明并保留首次登记时间。确认已处理或无需跟进后用 `resolve` 关闭：
 
