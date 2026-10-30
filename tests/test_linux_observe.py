@@ -11,6 +11,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "tools"))
 
 import linux_observe as linux
+import observe
 from state_io import StewardError
 
 
@@ -34,6 +35,69 @@ HugePages_Rsvd:    1
 HugePages_Surp:    0
 Hugepagesize:   2048 kB
 Odd:               7 MB
+"""
+
+# K6 真机 60 字段样式；带括号字段、无单位 HugePages 计数与未知单位各一处。
+MEMINFO_REALISTIC = """MemTotal:       32784628 kB
+MemFree:          5234567 kB
+MemAvailable:   23456789 kB
+Buffers:           654321 kB
+Cached:           9876543 kB
+SwapCached:             0 kB
+Active:          12345678 kB
+Inactive:         5678901 kB
+Active(anon):     3456789 kB
+Inactive(anon):    456789 kB
+Active(file):     8888889 kB
+Inactive(file):   5222112 kB
+Unevictable:          32 kB
+Mlocked:              32 kB
+SwapTotal:       8388604 kB
+SwapFree:        7340032 kB
+Zswap:                 0 kB
+Zswapped:              0 kB
+Dirty:              4321 kB
+Writeback:             0 kB
+AnonPages:        4567890 kB
+Mapped:           1234567 kB
+Shmem:             345678 kB
+KReclaimable:      456789 kB
+Slab:              567890 kB
+SReclaimable:      456789 kB
+SUnreclaim:        111101 kB
+KernelStack:        12345 kB
+PageTables:         23456 kB
+SecPageTables:          0 kB
+NFS_Unstable:           0 kB
+Bounce:                 0 kB
+WritebackTmp:           0 kB
+CommitLimit:     24575918 kB
+Committed_AS:     6789012 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:        12345 kB
+VmallocChunk:           0 kB
+Percpu:              4567 kB
+HardwareCorrupted:      0 kB
+AnonHugePages:      123456 kB
+ShmemHugePages:          0 kB
+ShmemPmdMapped:          0 kB
+FileHugePages:           0 kB
+FilePmdMapped:           0 kB
+CmaTotal:                0 kB
+CmaFree:                 0 kB
+Unaccepted:              0 kB
+Balloon:                 0 kB
+GPUActive:               0 kB
+HugePages_Total:         4
+HugePages_Free:          2
+HugePages_Rsvd:          1
+HugePages_Surp:          0
+Hugepagesize:         2048 kB
+Hugetlb:                 0 kB
+DirectMap4k:        678901 kB
+DirectMap2M:       8910112 kB
+DirectMap1G:      16777216 kB
+Odd:                     7 MB
 """
 
 
@@ -187,6 +251,94 @@ class LinuxObserveTests(unittest.TestCase):
         self.assertNotIn("MemAvailable", result["counters"])
         self.assertEqual(result["platform_gaps"][0]["field"], "MemAvailable")
         self.assertIn("不伪造", result["available_reason"])
+
+    def test_memory_section_parses_full_meminfo_and_classifies_units(self):
+        section = linux.memory_section(MEMINFO_REALISTIC)
+        self.assertTrue(section["available"])
+        self.assertIsNone(section["reason"])
+        self.assertEqual(section["source"], "/proc/meminfo")
+        self.assertEqual(len(section["counters"]), 60)
+        self.assertEqual(section["total_bytes"], 32784628 * 1024)
+        self.assertEqual(section["available_bytes"], 23456789 * 1024)
+        self.assertEqual(section["counters"]["Active(anon)"], 3456789 * 1024)
+        self.assertEqual(section["counters"]["Inactive(file)"], 5222112 * 1024)
+        self.assertEqual(section["units"]["Active(anon)"], "bytes")
+        self.assertEqual(section["counters"]["HugePages_Total"], 4)
+        self.assertEqual(section["counters"]["HugePages_Free"], 2)
+        self.assertEqual(section["counters"]["HugePages_Rsvd"], 1)
+        self.assertEqual(section["counters"]["HugePages_Surp"], 0)
+        self.assertEqual(section["units"]["HugePages_Total"], "count")
+        self.assertIsNone(section["source_units"]["HugePages_Total"])
+        self.assertEqual(section["counters"]["Hugepagesize"], 2048 * 1024)
+        self.assertEqual(section["units"]["Hugepagesize"], "bytes")
+        self.assertEqual(section["counters"]["Odd"], 7)
+        self.assertEqual(section["units"]["Odd"], "MB")
+        self.assertEqual(section["source_units"]["Odd"], "MB")
+        self.assertEqual(section["platform_gaps"], [])
+        self.assertIsNone(section["available_reason"])
+        self.assertEqual(section["swap"]["total_bytes"], 8388604 * 1024)
+        self.assertEqual(section["swap"]["free_bytes"], 7340032 * 1024)
+        self.assertEqual(section["swap"]["used_bytes"], (8388604 - 7340032) * 1024)
+        self.assertIn("units=count", section["units_semantics"])
+
+    def test_memory_section_missing_memavailable_is_a_platform_gap(self):
+        text = "\n".join(line for line in MEMINFO_REALISTIC.splitlines()
+                         if not line.startswith("MemAvailable:")) + "\n"
+        section = linux.memory_section(text)
+        self.assertIsNone(section["available_bytes"])
+        self.assertNotIn("MemAvailable", section["counters"])
+        self.assertEqual(section["platform_gaps"], [{
+            "field": "MemAvailable",
+            "reason": "旧内核 /proc/meminfo 未提供 MemAvailable；不伪造推导值"}])
+        self.assertEqual(section["available_reason"], section["platform_gaps"][0]["reason"])
+        adapted = observe.observe_linux_memory(
+            {"command_bytes": 262144},
+            source=self.source(read_bytes=lambda path, limit: text.encode("utf-8")))
+        self.assertEqual(adapted["platform_gaps"], section["platform_gaps"])
+        self.assertIsNone(adapted["available_bytes"])
+
+    def test_memory_section_rejects_inconsistent_or_malformed_fields(self):
+        base = MEMINFO_REALISTIC.splitlines()
+        cases = {
+            "duplicate field": base + ["MemFree: 1 kB"],
+            "swap free above total": [
+                line.replace("SwapFree:        7340032 kB", "SwapFree:        9340032 kB")
+                for line in base],
+            "available above total": [
+                line.replace("MemAvailable:   23456789 kB", "MemAvailable:   93456789 kB")
+                for line in base],
+            "MemTotal zero": [
+                line.replace("MemTotal:       32784628 kB", "MemTotal:              0 kB")
+                for line in base],
+            "wrong MemTotal unit": [
+                line.replace("MemTotal:       32784628 kB", "MemTotal:       32784628 MB")
+                for line in base],
+            "wrong SwapTotal unit": [
+                line.replace("SwapTotal:       8388604 kB", "SwapTotal:       8388604 MB")
+                for line in base],
+            "wrong MemAvailable unit": [
+                line.replace("MemAvailable:   23456789 kB", "MemAvailable:   23456789 MB")
+                for line in base],
+            "malformed line": base + ["not a meminfo line"],
+        }
+        for label, lines in cases.items():
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                linux.memory_section("\n".join(lines) + "\n")
+
+    def test_memory_section_matches_observe_memory_and_patrol_adapter(self):
+        expected = linux.memory_section(MEMINFO_REALISTIC)
+        source = self.source(read_bytes=lambda path, limit: MEMINFO_REALISTIC.encode("utf-8"))
+        self.assertEqual(linux.observe_memory(self.budget(), source=source), expected)
+        adapted = observe.observe_linux_memory({"command_bytes": 262144}, source=source)
+        self.assertEqual(adapted, dict(expected, semantics=expected["units_semantics"]))
+        self.assertEqual(adapted["semantics"], adapted["units_semantics"])
+        self.assertEqual(set(adapted), set(expected) | {"semantics"})
+
+    def test_observe_linux_memory_uses_command_byte_budget(self):
+        source = self.source(read_bytes=lambda path, limit: MEMINFO_REALISTIC.encode("utf-8"))
+        with self.assertRaises(linux.LinuxBudgetExceededError) as raised:
+            observe.observe_linux_memory({"command_bytes": 64}, source=source)
+        self.assertEqual(raised.exception.kind, "command_bytes")
 
     def test_meminfo_required_and_inconsistent_fields_raise(self):
         base = MEMINFO.splitlines()

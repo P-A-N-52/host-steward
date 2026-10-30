@@ -379,10 +379,12 @@ def _require_meminfo_kb(key, counters, source_units):
     return counters[key]
 
 
-def observe_memory(budget, *, proc_root=DEFAULT_PROC_ROOT, sys_root=DEFAULT_SYS_ROOT, source=None):
-    """读取 /proc/meminfo；kB 换字节，无单位计数保持原值。"""
-    source = _selected_source(source, proc_root, sys_root)
-    text = source.read_text(source.proc_path("meminfo"), budget, max_bytes=MEMINFO_BYTES)
+def memory_section(text):
+    """解析 /proc/meminfo 文本，返回 patrol 与常驻采样共用的内存 section。
+
+    纯函数：只依赖传入文本，不做任何 I/O。kB 换字节，无单位计数保持原值，
+    未知单位不换算；重复字段、关键字段单位、容量一致性和不可解析行直接报错。
+    """
     counters, units, source_units = _parse_meminfo(text)
     total_bytes = _require_meminfo_kb("MemTotal", counters, source_units)
     if total_bytes <= 0:
@@ -428,6 +430,13 @@ def observe_memory(budget, *, proc_root=DEFAULT_PROC_ROOT, sys_root=DEFAULT_SYS_
         "units_semantics": "units=bytes 表示来源单位 kB 已乘 1024；units=count 表示来源无单位计数，"
                            "保持原值（例如 HugePages_Total/Free/Rsvd/Surp）；其他单位不换算，保持原数值",
     }
+
+
+def observe_memory(budget, *, proc_root=DEFAULT_PROC_ROOT, sys_root=DEFAULT_SYS_ROOT, source=None):
+    """有界读取 /proc/meminfo，再交给 memory_section 解析与校验。"""
+    source = _selected_source(source, proc_root, sys_root)
+    text = source.read_text(source.proc_path("meminfo"), budget, max_bytes=MEMINFO_BYTES)
+    return memory_section(text)
 
 
 def _parse_diskstats(text):

@@ -950,13 +950,16 @@ class StewardTests(unittest.TestCase):
                     observe_darwin_memory(self.policy["limits"])
 
     def test_linux_memory_observation_uses_explicit_available_memory(self):
-        from unittest.mock import patch
+        import linux_observe
         from observe import observe_linux_memory
         text = "MemTotal: 1000 kB\nMemAvailable: 250 kB\nSwapTotal: 1000 kB\nSwapFree: 500 kB\n"
-        with patch("observe.Path.read_text", return_value=text):
-            result = observe_linux_memory()
+        source = linux_observe.LinuxSource(read_bytes=lambda path, limit: text.encode("utf-8"))
+        result = observe_linux_memory(self.policy["limits"], source=source)
         self.assertEqual(result["total_bytes"], 1024000)
         self.assertEqual(result["available_bytes"], 256000)
+        self.assertEqual(result["source"], "/proc/meminfo")
+        self.assertEqual(result["units"]["MemTotal"], "bytes")
+        self.assertEqual(result["semantics"], result["units_semantics"])
 
     VM_STAT_TEXT = (
         "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
@@ -1115,6 +1118,9 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(result["memory"]["counters"]["Swapins"], 2590403)
         self.assertTrue(result["memory"]["swap"]["available"])
         self.assertEqual(result["memory"]["swap"]["used_bytes"], 726075965)
+        self.assertIn("采样时点", result["memory"]["swap"]["semantics"])
+        self.assertIn("不是历史高水位", result["memory"]["swap"]["semantics"])
+        self.assertNotIn("累计高水位", result["memory"]["swap"]["semantics"])
         self.assertTrue(result["network"]["interfaces"]["available"])
         self.assertEqual(result["network"]["interfaces"]["items"][0]["name"], "en0")
         self.assertEqual(result["network"]["tcp_states"]["states"], {"LISTEN": 1, "CLOSE_WAIT": 1})
@@ -1151,7 +1157,8 @@ class StewardTests(unittest.TestCase):
             observe(self.policy)
 
     def test_linux_observe_collects_counters_and_network(self):
-        from observe import observe
+        import linux_observe
+        from observe import observe, observe_linux_memory
         texts = {
             "/proc/meminfo": "MemTotal: 8000000 kB\nMemAvailable: 2500000 kB\nCached: 1000000 kB\n"
                              "AnonPages: 2000000 kB\nSwapTotal: 1048576 kB\nSwapFree: 524288 kB\n",
@@ -1182,11 +1189,17 @@ class StewardTests(unittest.TestCase):
                 return "example.service\n"
             raise AssertionError(arguments)
 
+        memory_source = linux_observe.LinuxSource(
+            read_bytes=lambda path, limit: texts["/proc/meminfo"].encode("utf-8"))
         with patch("observe.platform.system", return_value="Linux"), \
-             patch("observe.Path", FakePath), patch("observe.command", side_effect=response):
+             patch("observe.Path", FakePath), patch("observe.command", side_effect=response), \
+             patch("observe.observe_linux_memory",
+                   side_effect=lambda limits: observe_linux_memory(limits, source=memory_source)):
             result = observe(self.policy)
         self.assertTrue(result["memory"]["available"])
         self.assertEqual(result["memory"]["counters"]["AnonPages"], 2000000 * 1024)
+        self.assertEqual(result["memory"]["units"]["AnonPages"], "bytes")
+        self.assertEqual(result["memory"]["semantics"], result["memory"]["units_semantics"])
         self.assertTrue(result["memory"]["swap"]["available"])
         self.assertEqual(result["memory"]["swap"]["used_bytes"], 524288 * 1024)
         self.assertEqual(result["boot"], {"available": True, "unix_time": 1791379437, "reason": None})

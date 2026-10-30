@@ -11,8 +11,14 @@ import subprocess
 import time
 from collections import Counter
 
+import linux_observe
 from state_io import StewardError
 from policy import root_paths
+
+
+DARWIN_SWAP_SEMANTICS = ("used 是采样时点当前已分配/使用的 swap 量，不是历史高水位；"
+                         "当前压力结合 vm_stat 的 Swapins/Swapouts 差分判断")
+LINUX_MEMORY_SECONDS = 3.0
 
 
 class CommandFailedError(StewardError):
@@ -337,24 +343,23 @@ def observe_darwin_memory(limits):
     return {"available": True, "total_bytes": total_bytes, "page_size": page_size,
             "counters": parse_vm_counters(memory),
             "swap": dict(parse_swapusage(swap), available=True,
-                         semantics="used 是累计高水位，当前压力看 vm_stat 的 Swapins/Swapouts 差分"),
+                         semantics=DARWIN_SWAP_SEMANTICS),
             "reason": None,
             "semantics": "counters 为 vm_stat 自开机原始计数：Pages* 键是页数（字节 = 页数 × page_size），"
                          "Pageins/Swapins/Compressions 等键是累计事件次数"}
 
 
-def observe_linux_memory():
-    info = dict(re.findall(r"^(\w+):\s+(\d+)", Path("/proc/meminfo").read_text(), re.M))
-    total, available = int(info["MemTotal"]) * 1024, int(info["MemAvailable"]) * 1024
-    memory = {"available": True, "total_bytes": total, "available_bytes": available,
-              "counters": {key: int(value) * 1024 for key, value in info.items()},
-              "semantics": "counters 为 /proc/meminfo 全部键值（kB 换算字节）；Cached+SReclaimable 是可回收缓存，"
-                           "AnonPages 是匿名占用，MemAvailable 已扣除可回收部分"}
-    swap_total, swap_free = int(info["SwapTotal"]) * 1024, int(info["SwapFree"]) * 1024
-    memory["swap"] = {"available": True, "total_bytes": swap_total,
-                      "used_bytes": swap_total - swap_free, "free_bytes": swap_free,
-                      "semantics": "used 是累计高水位，当前压力看换入换出差分"}
-    return memory
+def observe_linux_memory(limits, *, source=None):
+    """patrol 的 Linux 内存薄适配器：复用 linux_observe 的唯一 meminfo 实现。
+
+    ``limits`` 只取 ``command_bytes``；单次读取固定 3 秒时间预算，不新增
+    policy 字段。返回常驻采样同一 section，并保留 ``semantics`` 作为
+    ``units_semantics`` 的兼容别名。
+    """
+    budget = linux_observe.LinuxBudget(limits["command_bytes"], LINUX_MEMORY_SECONDS)
+    section = linux_observe.observe_memory(budget, source=source)
+    section["semantics"] = section["units_semantics"]
+    return section
 
 
 def observe_linux_cpu():
@@ -454,7 +459,7 @@ def observe(policy):
         result["cpu"]["utilization"], result["diskio"] = observe_iostat(limits)
         result["gpu"] = observe_gpu(limits)
     elif system == "Linux":
-        result["memory"] = observe_linux_memory()
+        result["memory"] = observe_linux_memory(limits)
         result["cpu"].update(observe_linux_cpu())
         result["gpu"]["reason"] = "Linux 无通用免提权 GPU 统计来源"
         service = command(["systemctl", "list-units", "--type=service", "--state=running", "--no-pager", "--plain", "--no-legend"], limits["command_bytes"])
