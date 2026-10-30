@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ import baseline
 import files
 from baseline import (GAP_FAIR, GAP_MTIME, GAP_MTIME_PASS, GAP_RANGE, GAP_VANISHED,
                       resumable_scan)
+from database import RESERVE_HEADROOM
 from state_schema import read_current
 from state import StewardError
 from steward import initialize, patrol
@@ -708,12 +710,20 @@ class PatrolBaselineTests(unittest.TestCase):
         self.assertFalse(any("mtime" in reason for reason in current["baselines"][root].get("gaps", [])))
 
     def test_capacity_failure_during_completion_keeps_progress_and_repeats(self):
+        """下一轮即可完成时把预算收紧到当前库加半页，完成写入必然撞页上限。
+
+        判定与预算都由当前进度、库大小和页大小派生，不依赖平台的库膨胀曲线、
+        临时路径长度或文件系统，macOS 与 Linux 都能确定性触发。
+        """
         for index in range(300):
             directory = self.root / f"group{index // 100}" / f"dir-{index:04d}"
             self.write(directory / "file.txt", index + 1)
-        self.policy["limits"].update(scan_entries=50, total_bytes=1_200_000)
+        original_total = self.policy["limits"]["total_bytes"]
+        self.policy["limits"]["scan_entries"] = 50
         self.store.write("host.json", self.policy)
+        root = str(self.root)
         failure = None
+        tightened = False
         for _ in range(40):
             try:
                 report = self.run_patrol()
@@ -721,9 +731,30 @@ class PatrolBaselineTests(unittest.TestCase):
                 failure = str(exc)
                 break
             self.assertFalse(report["last_run"]["coverage_complete"])
+            progress = read_current(self.store).get("scan_progress") or {}
+            if root not in progress:
+                continue
+            # 同一份进度与预算在内存中续扫即可完成：下一轮是完成轮。
+            snapshots, remaining = resumable_scan(
+                progress, self.policy["roots"], self.policy["limits"],
+                self.policy.get("exclude_names", ()), str(self.store.path))
+            if remaining or not snapshots[root]["complete"]:
+                continue
+            capacity = self.store.capacity()
+            connection = sqlite3.connect(str(self.store.database_path))
+            try:
+                page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+            finally:
+                connection.close()
+            # 收紧到当前库加半页：完成轮新增内容必然需要新页，写入撞页上限回滚。
+            limit = capacity["database_bytes"] + page_size // 2
+            self.policy["limits"]["total_bytes"] = (
+                limit * 65 // 32 + capacity["outside_bytes"] + RESERVE_HEADROOM)
+            self.store.write("host.json", self.policy)
+            tightened = True
         self.assertIsNotNone(failure)
+        self.assertTrue(tightened)
         self.assertIn("状态总容量不足", failure)
-        root = str(self.root)
         current = read_current(self.store)
         progress = current["scan_progress"]
         self.assertIn(root, progress)
@@ -740,8 +771,8 @@ class PatrolBaselineTests(unittest.TestCase):
             self.run_patrol()
         self.assertEqual(str(raised.exception), failure)
         self.assertEqual(read_current(self.store)["scan_progress"], progress)
-        # 调高预算后从保留的进度完成并写入基线。
-        self.policy["limits"]["total_bytes"] = 4 * 1024 * 1024
+        # 恢复初始预算后从保留的进度一轮完成并写入基线。
+        self.policy["limits"]["total_bytes"] = original_total
         self.store.write("host.json", self.policy)
         report = self.run_patrol()
         self.assertTrue(report["last_run"]["coverage_complete"])

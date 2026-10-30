@@ -144,10 +144,18 @@ class SamplesCliTests(unittest.TestCase):
         self.assertEqual(json.loads(status.stdout)["status"], "output_limited")
 
     def test_collect_once_budget_failure_exits_nonzero_without_fake_sample(self):
+        """预算超限整批失败且不写样本：字节预算跨平台可达，时间预算共享语义。
+
+        Linux 上一轮 /proc 采样远快于 cycle_seconds 的最小合法值 1 秒，时间预算
+        无法经真实 CLI 触发；其“超限即整批失败、不伪造样本”的语义由
+        tests/test_resource_sampler.py 的注入式单元测试覆盖。这里把命令输出字节
+        预算收到 1，首个数据源读取即超限，用同一批失败语义做跨平台验证。
+        """
         host = self.state / "host.json"
         policy = json.loads(host.read_text(encoding="utf-8"))
         policy["sampling"].update(interval_seconds=1, cycle_seconds=1,
                                   process_interval_seconds=1)
+        policy["limits"]["command_bytes"] = 1
         host.write_text(json.dumps(policy, ensure_ascii=False, indent=2), encoding="utf-8")
         result = self.cli("collect", "--once", "--state", str(self.state))
         self.assertEqual(result.returncode, 2, result.stdout)
