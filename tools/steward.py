@@ -855,7 +855,12 @@ def main():
     store, policy = load(args.state)
     if args.action == "check":
         from custom_checks import check_report
-        report = check_report(policy, store.path, store.limits, name=args.name, run_all=args.all)
+
+        def policy_guard():
+            ensure_policy_locked(store, policy)
+
+        report = check_report(policy, store.path, store.limits, name=args.name, run_all=args.all,
+                              policy_guard=policy_guard)
         limit_bytes = store.limits["output_bytes"]
         output_trimmed = len(encode(report)) > limit_bytes
         emit(report, limit_bytes)

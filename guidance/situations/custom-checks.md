@@ -52,6 +52,7 @@ stdout 必须是 UTF-8；stderr 合并进 stdout，与工具其他 `command` 调
 | 无法执行 | `failed` | `reason`，通常是 `无法执行：...` |
 | 输出不是 UTF-8 | `failed` | `reason` |
 | `--all` 总预算耗尽 | `skipped_budget` | `reason` |
+| 脚本启动前本机约定变化或无法重新核对 | `skipped_policy_changed` | `reason`；当前项与剩余项都不启动 |
 
 输出整形规则：
 
@@ -80,7 +81,7 @@ python3 /绝对路径/tools/steward.py check --state /绝对路径/本机状态
 python3 /绝对路径/tools/steward.py check --state /绝对路径/本机状态 --name backup-freshness
 ```
 
-未配置的 `name` 直接报错，不会运行任何脚本。
+未配置的 `name` 直接报错，不会运行任何脚本。启动前会重新核对整份 `host.json`；约定变化或无法核对时该项不启动，状态为 `skipped_policy_changed`，CLI 退出 2。
 
 ### 运行全部
 
@@ -89,6 +90,8 @@ python3 /绝对路径/tools/steward.py check --state /绝对路径/本机状态 
 ```
 
 `--name` 与 `--all` 互斥。`--all` 按配置顺序串行运行，总时长受 `limits.scan_seconds` 限制；空配置返回 `count: 0`、`complete: true`。
+
+每个脚本实际启动前，CLI 都会重新读取并校验整份 `host.json`，与维护命令在副作用前重新确认约定的做法一致。条目删除、改名、命令/用途/预算等语义变化，以及仅格式变化，都会中止本次运行：当前项与所有剩余项标为 `skipped_policy_changed`，脚本不启动，报告顶层追加 `policy_changed`，CLI 退出 2。总预算已耗尽的项仍先按 `skipped_budget` 处理，不触发复核；列表模式不执行脚本，也不做逐项复核。
 
 结果报告形如：
 
@@ -107,14 +110,38 @@ python3 /绝对路径/tools/steward.py check --state /绝对路径/本机状态 
 }
 ```
 
-`failed` 统计状态不是 `ok` 或 `skipped_budget` 的项；`complete` 仅在 `failed == 0` 且 `skipped == 0` 时为真。
+约定在运行中变化时，报告追加中止项与顶层 `policy_changed`：
+
+```json
+{
+  "status": "custom_check_results",
+  "checks": [
+    {"name": "first", "purpose": "第一项", "status": "ok", "exit_code": 0,
+     "format": "text", "output": "", "output_bytes": 0, "returned_bytes": 0,
+     "truncated": false, "elapsed_seconds": 0.01},
+    {"name": "second", "purpose": "第二项", "status": "skipped_policy_changed",
+     "reason": "本机约定在检查运行期间变化或无法重新核对；脚本未启动"}
+  ],
+  "count": 2, "executed": 1, "failed": 0, "skipped": 1,
+  "complete": false,
+  "policy_changed": {
+    "reason": "本机约定在检查运行期间变化或无法重新核对；后续脚本未启动，请重新运行",
+    "detail": "本机约定在本轮执行期间变化，旧计划未提交；请重新运行"
+  },
+  "budget": {"timeout_seconds": 3, "command_bytes": 262144, "output_bytes": 32768},
+  "elapsed_seconds": 0.1
+}
+```
+
+`failed` 统计状态不是 `ok`、`skipped_budget` 或 `skipped_policy_changed` 的项；`skipped` 同时统计 `skipped_budget` 与 `skipped_policy_changed`；`complete` 仅在 `failed == 0` 且 `skipped == 0` 时为真。`policy_changed.reason` 是检查语境的固定文案，`detail` 是重新核对时的原始消息（最多 512 字符）。
 
 ### 退出码
 
 - 列出模式不运行脚本，正常返回退出 0；整份输出被裁剪时按下面的裁剪处理退出 2。
 - 运行模式全部 `ok` 时退出 0。
 - 任一执行项为 `failed`、`timeout`、`output_limited` 或 `skipped_budget` 时退出 2。
-- 整份报告超过 `limits.output_bytes`、终端只返回 `output_limited` 摘要时退出 2。此时改用 `--name` 缩小范围，或减少输出后重跑。
+- 存在 `skipped_policy_changed` 时退出 2：本机约定在运行中变化或无法重新核对，后续脚本未启动；重新核对并修复 `host.json` 后重跑。
+- 整份报告超过 `limits.output_bytes`、终端只返回 `output_limited` 摘要时退出 2。此时改用 `--name` 缩小范围，或减少输出后重跑；裁剪摘要不保留 `policy_changed` 细节。
 - 单项结果中的 `truncated` 只表示该项返回文本被裁剪，本身不改变 `status`；整份报告仍可能因输出预算被替换并触发退出 2。
 
 ## 预算
@@ -133,7 +160,7 @@ python3 /绝对路径/tools/steward.py check --state /绝对路径/本机状态 
 
 ## 结果与状态
 
-- `check` 只读取 `host.json` 并执行脚本，不读写 `steward.sqlite3` 中的观测、档案、事项和 operations，也不把检查结果写入状态。
+- `check` 启动时读取 `host.json`，并在每个脚本实际启动前重新核对整份 `host.json`；不读写 `steward.sqlite3` 中的观测、档案、事项和 operations，也不把检查结果写入状态。
 - 因此没有检查历史、没有跨轮趋势，也不能用 `status` 找回上次输出。需要保留结论时，由 agent 在当轮汇总，并用既有流程保存：跨轮跟进用 `track`，目录说明用 `note`，长期资源知识用 `inventory`；宿主调度日志是另一条可选的原始输出保存位置。
 - `patrol` 不会自动运行自定义检查，检查也不会增加巡检的扫描或写状态开销。需要例行检查时，由宿主调度或 agent 在巡检中显式调用 `check`。
 - 检查脚本不应承担维护。脚本若会修改文件、服务或配置，应按维护动作计划、核验、执行、验证和记录，而不是伪装成只读检查；工具无法代替这种授权判断。
@@ -141,6 +168,8 @@ python3 /绝对路径/tools/steward.py check --state /绝对路径/本机状态 
 ## 授权与副作用
 
 脚本以当前用户权限运行，能访问该用户可访问的文件、网络和服务。工具只能限制执行时间与输出，不能限制系统调用、文件写入、网络请求或权限范围，也不能保证脚本只读。
+
+每项启动前的复核只覆盖尚未启动的脚本：已经运行的脚本无法撤回，其结果按实际执行记录；复核通过到 `command()` 实际 exec 之间仍有极短窗口，`host.json` 的原子写入只保证复核读到完整快照，不是沙箱。运行 `check` 期间不要编辑 `host.json`；编辑后重新运行，让新名单在新一轮授权下生效。
 
 新增或修改一个检查前，说明：
 
@@ -177,5 +206,6 @@ python3 /绝对路径/tools/steward.py check --state /绝对路径/本机状态 
 2. **单项成功**：运行 `--name`，确认 `status: "ok"`、`exit_code: 0`，并核对 `format` 与 `data`/`output` 是否符合脚本约定；需要时让脚本回显 `HOST_STEWARD_STATE` 与 `HOST_STEWARD_CHECK_NAME`。
 3. **全部运行**：运行 `--all`，确认 `count`、`executed`、`failed`、`skipped`、`complete` 与实际一致，退出码为 0。
 4. **失败路径**：用临时脚本分别制造非零退出、超过 `scan_seconds`、超过 `command_bytes` 和多个慢检查耗尽总预算，确认状态分别为 `failed`、`timeout`、`output_limited`、`skipped_budget`，并确认退出码为 2。
-5. **状态不变**：检查前后对照 `status` 和 operations，确认没有新增检查记录；`check` 不写状态库。若宿主调度需要运行证据，在调度日志或 `track` 中保存。
-6. **配置回退**：恢复 `host.json` 副本后重新列出，确认检查名单回到预期。
+5. **配置变更中止**：让第一项脚本删除或改写第二项（删除条目、改 `command` 或 `purpose`，或写坏/删除 `host.json`），运行 `--all`；确认第二项没有执行、状态为 `skipped_policy_changed`、报告含 `policy_changed`，退出码为 2。恢复配置后重新运行应回到正常结果。
+6. **状态不变**：检查前后对照 `status` 和 operations，确认没有新增检查记录；`check` 不写状态库。若宿主调度需要运行证据，在调度日志或 `track` 中保存。
+7. **配置回退**：恢复 `host.json` 副本后重新列出，确认检查名单回到预期。
