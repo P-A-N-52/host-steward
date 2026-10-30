@@ -6,7 +6,10 @@ import time
 
 from observe import CommandFailedError, CommandOutputError, command
 from policy import custom_checks
-from state_io import StewardError, decode, encode
+from state_io import PolicyChangedError, StewardError, decode, encode
+
+POLICY_CHANGED_REASON = "本机约定在检查运行期间变化或无法重新核对；后续脚本未启动，请重新运行"
+SKIPPED_POLICY_CHANGED_REASON = "本机约定在检查运行期间变化或无法重新核对；脚本未启动"
 
 
 def _executable_available(path):
@@ -75,8 +78,12 @@ def _run_one(check, state_path, timeout, capture_bytes, output_limit):
     return result
 
 
-def check_report(policy, state_path, limits, name=None, run_all=False):
-    """列出配置，或按本机预算运行指定检查；不读写状态数据。"""
+def check_report(policy, state_path, limits, name=None, run_all=False, policy_guard=None):
+    """列出配置，或按本机预算运行指定检查；不读写状态数据。
+
+    policy_guard 在每个脚本实际启动前调用，用于重新核对本机约定；失败时必须
+    抛出 PolicyChangedError，由本函数记录中止结果而不是让异常冒到 CLI。
+    """
     configured = custom_checks(policy)
     if name is not None:
         selected = [check for check in configured if check["name"] == name]
@@ -102,6 +109,7 @@ def check_report(policy, state_path, limits, name=None, run_all=False):
     started = time.monotonic()
     results = []
     skipped = 0
+    policy_changed = None
     for index, check in enumerate(selected):
         if run_all:
             remaining = timeout - (time.monotonic() - started)
@@ -115,9 +123,21 @@ def check_report(policy, state_path, limits, name=None, run_all=False):
             per_timeout = min(timeout, remaining)
         else:
             per_timeout = timeout
+        if policy_guard is not None:
+            try:
+                policy_guard()
+            except PolicyChangedError as exc:
+                for pending in selected[index:]:
+                    results.append({"name": pending["name"], "purpose": pending["purpose"],
+                                    "status": "skipped_policy_changed",
+                                    "reason": SKIPPED_POLICY_CHANGED_REASON})
+                    skipped += 1
+                policy_changed = {"reason": POLICY_CHANGED_REASON, "detail": str(exc)[:512]}
+                break
         results.append(_run_one(check, state_path, per_timeout, capture_bytes, output_limit))
-    failed = sum(1 for result in results if result["status"] not in ("ok", "skipped_budget"))
-    return {
+    failed = sum(1 for result in results
+                 if result["status"] not in ("ok", "skipped_budget", "skipped_policy_changed"))
+    report = {
         "status": "custom_check_results",
         "checks": results,
         "count": len(results),
@@ -129,3 +149,6 @@ def check_report(policy, state_path, limits, name=None, run_all=False):
                    "output_bytes": output_budget},
         "elapsed_seconds": round(time.monotonic() - started, 3),
     }
+    if policy_changed is not None:
+        report["policy_changed"] = policy_changed
+    return report
