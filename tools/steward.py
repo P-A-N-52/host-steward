@@ -771,7 +771,7 @@ def main():
     selection.add_argument("--name", help="运行指定名称的自定义检查")
     selection.add_argument("--all", action="store_true", help="在 scan_seconds 总预算内依次运行全部检查")
     for action in ["patrol", "note", "quarantine", "restore", "track", "resolve", "status", "inventory", "inspect",
-                   "migrate", "export", "backup", "upgrade"]:
+                   "migrate", "export", "backup", "backup-bundle", "upgrade", "restore-bundle"]:
         child = commands.add_parser(action)
         child.add_argument("--state", required=True)
         if action in ["track", "resolve"]:
@@ -790,6 +790,15 @@ def main():
             child.add_argument("--output", help="独占创建 JSON 导出文件；省略时按输出预算返回")
         if action == "backup":
             child.add_argument("--output", required=True, help="在状态目录之外独占创建 SQLite 备份")
+        if action == "backup-bundle":
+            child.add_argument("--output", required=True,
+                               help="在状态目录之外独占创建完整备份目录（host/adaptation/guidance/数据库）")
+        if action == "restore-bundle":
+            child.add_argument("--bundle", required=True, help="backup-bundle 创建的完整备份目录")
+            child.add_argument("--apply", action="store_true",
+                               help="写入全新状态目录；默认只校验预览，不写任何文件")
+            child.add_argument("--allow-foreign-host", action="store_true",
+                               help="允许恢复到主机标识不同的主机；不改写 host.json，恢复后需人工核对")
         if action == "patrol":
             child.add_argument("--quiet", action="store_true")
             child.add_argument("--discard-scan-progress", action="store_true",
@@ -858,6 +867,12 @@ def main():
                 or report.get("status") == "output_limited"):
             raise SystemExit(2)
         return
+    if args.action == "restore-bundle":
+        # 目标状态目录尚不存在，必须在 load(args.state) 之前处理；默认只预览。
+        from storage_tools import restore_bundle
+        emit(restore_bundle(args.bundle, args.state, apply=args.apply,
+                            allow_foreign_host=args.allow_foreign_host))
+        return
     store, policy = load(args.state)
     if args.action == "check":
         from custom_checks import check_report
@@ -903,12 +918,14 @@ def main():
         def policy_guard():
             ensure_policy_locked(store, policy)
 
-        if args.action in ["migrate", "export", "backup"]:
-            from storage_tools import backup_database, export_dataset, migrate_json
+        if args.action in ["migrate", "export", "backup", "backup-bundle"]:
+            from storage_tools import backup_bundle, backup_database, export_dataset, migrate_json
             if args.action == "migrate":
                 report = migrate_json(store, args.apply, policy_guard)
             elif args.action == "export":
                 report = export_dataset(store, args.dataset, args.output)
+            elif args.action == "backup-bundle":
+                report = backup_bundle(store, policy, args.output, policy_guard)
             else:
                 report = backup_database(store, args.output)
         elif args.action == "inventory":
