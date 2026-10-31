@@ -1155,6 +1155,71 @@ class SampleStoreTests(unittest.TestCase):
         self.assertEqual(raw["history"], {"gap_pruned_through": None,
                                           "gap_history_degraded": None})
 
+    def test_sample_pair_reads_ordered_samples_and_overlapping_gaps(self):
+        first = self.append(0)
+        self.append(1)
+        third = self.append(2)
+        self.samples.record_gap(BASE + 1.2, BASE + 1.6, "source_failed",
+                                detail={"reason": "采集超时"})
+        pair = self.samples.sample_pair(first["sample_id"], third["sample_id"])
+        self.assertEqual(pair["requested"],
+                         {"from_sample": first["sample_id"],
+                          "to_sample": third["sample_id"]})
+        self.assertEqual(pair["baseline"]["sample_id"], first["sample_id"])
+        self.assertEqual(pair["target"]["sample_id"], third["sample_id"])
+        self.assertEqual(pair["baseline"]["observed_at"], BASE)
+        self.assertEqual(pair["target"]["observed_at"], BASE + 2)
+        self.assertEqual(len(pair["gaps"]), 1)
+        self.assertEqual(pair["gaps"][0]["reason"], "source_failed")
+        self.assertEqual(pair["gaps"][0]["detail"]["reason"], "采集超时")
+        self.assertIn("complete_since", pair["gap_history"])
+
+    def test_sample_pair_rejects_missing_or_unordered_ids(self):
+        first = self.append(0)
+        second = self.append(1)
+        with self.assertRaises(DatabaseError):
+            self.samples.sample_pair(second["sample_id"], first["sample_id"])
+        with self.assertRaises(DatabaseError):
+            self.samples.sample_pair(first["sample_id"], first["sample_id"])
+        with self.assertRaises(DatabaseError) as caught:
+            self.samples.sample_pair(first["sample_id"], 999999)
+        self.assertIn("样本不存在", str(caught.exception))
+        for value in (0, -1, True, 1.5):
+            with self.assertRaises(DatabaseError):
+                self.samples.sample_pair(value, second["sample_id"])
+
+    def test_sample_pair_loads_only_requested_process_identity(self):
+        first = self.append(0, processes={"available": True, "observed_at": BASE,
+                                          "items": [
+                                              {"identity": "p1", "pid": 1, "rss_bytes": 100},
+                                              {"identity": "p2", "pid": 2, "rss_bytes": 200}]})
+        second = self.append(1, processes={"available": True, "observed_at": BASE + 1,
+                                           "items": [
+                                               {"identity": "p1", "pid": 1, "rss_bytes": 150},
+                                               {"identity": "p2", "pid": 2, "rss_bytes": 250}]})
+        pair = self.samples.sample_pair(first["sample_id"], second["sample_id"],
+                                        process="p1")
+        for sample in (pair["baseline"], pair["target"]):
+            self.assertEqual([row["identity"] for row in sample["processes"]], ["p1"])
+            self.assertIn("payload", sample["processes"][0])
+        # 请求的进程不在样本里时，样本仍按编号返回，只是进程行为空。
+        missing = self.append(2, processes=None)
+        other = self.append(3, processes=None)
+        pair = self.samples.sample_pair(missing["sample_id"], other["sample_id"],
+                                        process="p1")
+        self.assertEqual(pair["baseline"]["processes"], [])
+        self.assertEqual(pair["target"]["processes"], [])
+
+    def test_sample_pair_reads_are_bounded_by_total_budget(self):
+        first = self.append(0, host={"blob": "x" * 4096})
+        second = self.append(1, host={"blob": "x" * 4096})
+        original = dict(self.store.limits)
+        self.addCleanup(lambda: self.store.limits.update(original))
+        self.store.limits["total_bytes"] = 1024
+        with self.assertRaises(DatabaseError) as caught:
+            self.samples.sample_pair(first["sample_id"], second["sample_id"])
+        self.assertIn("预算", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

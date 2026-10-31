@@ -25,6 +25,7 @@ from state_io import decode, dumps
 
 DEFAULT_QUERY_LIMIT = 40
 MAX_QUERY_LIMIT = 200
+PAIR_SAMPLE_LIMIT = 32
 SOURCE_LIMIT = 64
 _STATE_FIELDS = frozenset({"run_id", "heartbeat_at", "last_complete_at", "stopped_at", "detail"})
 _STATE_MARKER_V1 = "__host_steward_collector_state_v1__"
@@ -141,6 +142,136 @@ class SampleStore:
             raise DatabaseError("SQLite 状态库无法检查") from exc
         return {"page_size": page_size, "pages": pages,
                 "free_pages": free_pages, "bytes": size}
+
+    def _sample_object(self, row):
+        policy = _decode(row[19], "运行配置证据")
+        evidence = _decode(row[20], "运行来源证据")
+        host = _decode(row[5], "host 样本")
+        sources_value = _decode(row[6], "来源样本")
+        sampling = _decode(row[7], "采样配置")
+        process_meta = None if row[12] is None \
+            else _decode(row[12], "进程采样元数据")
+        if not isinstance(policy, dict) or not isinstance(evidence, dict) \
+                or not isinstance(host, dict) or not isinstance(sources_value, dict) \
+                or not isinstance(sampling, dict) \
+                or (process_meta is not None and not isinstance(process_meta, dict)):
+            raise DatabaseError("运行配置、host、来源、采样或进程元数据损坏")
+        return {
+            "sample_id": row[0],
+            "run_id": row[1],
+            "observed_at": row[2],
+            "monotonic_at": row[3],
+            "boot": None if row[4] is None else _decode(row[4], "样本启动标识"),
+            "host": host,
+            "sources": sources_value,
+            "sampling": sampling,
+            "process_observed": bool(row[8]),
+            "process_truncated": bool(row[9]),
+            "process_observed_at": row[10],
+            "process_count": row[11],
+            "process_meta": process_meta,
+            "run": {
+                "run_id": row[1], "mode": row[13], "started_at": row[14],
+                "stopped_at": row[15], "stop_reason": row[16],
+                "boot": None if row[17] is None else _decode(row[17], "运行启动标识"),
+                "pid": row[18], "policy": policy, "evidence": evidence,
+            },
+        }
+
+    def _process_rows(self, connection, sample_ids, process, budget):
+        """按明确 identity 读取指定样本的进程行，长度在取回 JSON 前计入预算。"""
+        if not sample_ids:
+            return {}
+        placeholders = ",".join("?" for _ in sample_ids)
+        length_rows = connection.execute(
+            "SELECT sample_id, position, identity, "
+            "COALESCE(length(CAST(payload_json AS BLOB)), 0) "
+            "FROM process_samples WHERE sample_id IN (" + placeholders + ") "
+            "AND identity=? ORDER BY sample_id DESC, position",
+            (*sample_ids, process)).fetchall()
+        for row in length_rows:
+            budget.add([row[3]], "进程样本")
+        grouped = {}
+        for sample_id, position, identity, payload in connection.execute(
+                "SELECT sample_id, position, identity, payload_json "
+                "FROM process_samples WHERE sample_id IN (" + placeholders + ") "
+                "AND identity=? ORDER BY sample_id DESC, position",
+                (*sample_ids, process)):
+            grouped.setdefault(sample_id, []).append(
+                {"position": position, "identity": identity,
+                 "payload": _decode(payload, f"进程 {identity} 样本")})
+        return grouped
+
+    def _samples_by_ids(self, connection, sample_ids, process, budget):
+        """按 sample_id 精确读取样本；process 只加载该 identity 的进程行。"""
+        sample_ids = sorted(set(sample_ids))
+        if not sample_ids:
+            return []
+        if len(sample_ids) > PAIR_SAMPLE_LIMIT:
+            raise DatabaseError(f"按编号读取的样本数超过 {PAIR_SAMPLE_LIMIT} 项上限")
+        placeholders = ",".join("?" for _ in sample_ids)
+        where = "r.sample_id IN (" + placeholders + ")"
+        length_rows = connection.execute(
+            "SELECT r.sample_id, "
+            "COALESCE(length(CAST(r.boot_json AS BLOB)), 0), "
+            "COALESCE(length(CAST(r.host_json AS BLOB)), 0), "
+            "COALESCE(length(CAST(r.sources_json AS BLOB)), 0), "
+            "COALESCE(length(CAST(r.sampling_json AS BLOB)), 0), "
+            "COALESCE(length(CAST(r.process_meta_json AS BLOB)), 0), "
+            "COALESCE(length(CAST(c.boot_json AS BLOB)), 0), "
+            "COALESCE(length(CAST(c.policy_json AS BLOB)), 0), "
+            "COALESCE(length(CAST(c.evidence_json AS BLOB)), 0) "
+            "FROM resource_samples r JOIN collector_runs c ON c.run_id=r.run_id "
+            "WHERE " + where + " ORDER BY r.sample_id", sample_ids).fetchall()
+        for row in length_rows:
+            budget.add(row[1:], "资源历史样本")
+        rows = connection.execute(
+            "SELECT r.sample_id, r.run_id, r.observed_at, r.monotonic_at, r.boot_json, "
+            "r.host_json, r.sources_json, r.sampling_json, r.process_observed, "
+            "r.process_truncated, r.process_observed_at, r.process_count, "
+            "r.process_meta_json, c.mode, c.started_at, c.stopped_at, c.stop_reason, "
+            "c.boot_json, c.pid, c.policy_json, c.evidence_json "
+            "FROM resource_samples r JOIN collector_runs c ON c.run_id=r.run_id "
+            "WHERE " + where + " ORDER BY r.sample_id", sample_ids)
+        samples = [self._sample_object(row) for row in rows]
+        if process is not None:
+            grouped = self._process_rows(connection, sample_ids, process, budget)
+            for sample in samples:
+                sample["processes"] = grouped.get(sample["sample_id"], [])
+        return samples
+
+    def sample_pair(self, from_sample, to_sample, *, process=None):
+        """按编号读取一对样本及其覆盖区间的缺口；读取受单条与总量预算约束。
+
+        两点模式要求两个编号都存在且 from_sample < to_sample。process 只加载该
+        identity 的进程行；样本本身仍按编号读取，不因缺少该进程而缺失。
+        gap_history 以 target 的 observed_at 为参考时间，说明区间末端的缺口完整起点。
+        """
+        from_sample = _positive_int(from_sample, "from_sample")
+        to_sample = _positive_int(to_sample, "to_sample")
+        if from_sample >= to_sample:
+            raise DatabaseError("from_sample 必须小于 to_sample")
+        if process is not None:
+            process = self._key(process, "query process identity")
+        budget = self._budget()
+        with self._read() as connection:
+            samples = self._samples_by_ids(
+                connection, (from_sample, to_sample), process, budget)
+            found = {sample["sample_id"] for sample in samples}
+            missing = [value for value in (from_sample, to_sample) if value not in found]
+            if missing:
+                raise DatabaseError(
+                    "样本不存在：" + "、".join(str(value) for value in missing))
+            baseline, target = samples
+            gaps = self._gaps(connection, baseline["observed_at"],
+                              target["observed_at"], budget)
+            state = self._read_state(connection, budget)
+            latest_run = self._latest_run(connection, state, budget)
+            gap_history = self._gap_history(
+                connection, state, latest_run, target["observed_at"])
+        return {"requested": {"from_sample": from_sample, "to_sample": to_sample},
+                "baseline": baseline, "target": target,
+                "gaps": gaps, "gap_history": gap_history}
 
     def _sampling(self, sampling):
         if not isinstance(sampling, dict):
@@ -665,66 +796,14 @@ class SampleStore:
                 "FROM resource_samples r JOIN collector_runs c ON c.run_id=r.run_id "
                 "WHERE " + where + " ORDER BY r.sample_id DESC LIMIT ?",
                 (*parameters, limit))
-            samples = []
-            for row in rows:
-                policy = _decode(row[19], "运行配置证据")
-                evidence = _decode(row[20], "运行来源证据")
-                host = _decode(row[5], "host 样本")
-                sources_value = _decode(row[6], "来源样本")
-                sampling = _decode(row[7], "采样配置")
-                process_meta = None if row[12] is None \
-                    else _decode(row[12], "进程采样元数据")
-                if not isinstance(policy, dict) or not isinstance(evidence, dict) \
-                        or not isinstance(host, dict) or not isinstance(sources_value, dict) \
-                        or not isinstance(sampling, dict) \
-                        or (process_meta is not None and not isinstance(process_meta, dict)):
-                    raise DatabaseError("运行配置、host、来源、采样或进程元数据损坏")
-                samples.append({
-                    "sample_id": row[0],
-                    "run_id": row[1],
-                    "observed_at": row[2],
-                    "monotonic_at": row[3],
-                    "boot": None if row[4] is None else _decode(row[4], "样本启动标识"),
-                    "host": host,
-                    "sources": sources_value,
-                    "sampling": sampling,
-                    "process_observed": bool(row[8]),
-                    "process_truncated": bool(row[9]),
-                    "process_observed_at": row[10],
-                    "process_count": row[11],
-                    "process_meta": process_meta,
-                    "run": {
-                        "run_id": row[1], "mode": row[13], "started_at": row[14],
-                        "stopped_at": row[15], "stop_reason": row[16],
-                        "boot": None if row[17] is None else _decode(row[17], "运行启动标识"),
-                        "pid": row[18], "policy": policy, "evidence": evidence,
-                    },
-                })
+            samples = [self._sample_object(row) for row in rows]
             if process is not None and samples:
-                ids = [sample["sample_id"] for sample in samples]
-                placeholders = ",".join("?" for _ in ids)
-                length_rows = connection.execute(
-                    "SELECT sample_id, position, identity, "
-                    "COALESCE(length(CAST(payload_json AS BLOB)), 0) "
-                    "FROM process_samples WHERE sample_id IN (" + placeholders + ") "
-                    "AND identity=? ORDER BY sample_id DESC, position",
-                    (*ids, process)).fetchall()
-                for row in length_rows:
-                    budget.add([row[3]], "进程样本")
-                grouped = {}
-                for sample_id, position, identity, payload in connection.execute(
-                        "SELECT sample_id, position, identity, payload_json "
-                        "FROM process_samples WHERE sample_id IN (" + placeholders + ") "
-                        "AND identity=? ORDER BY sample_id DESC, position",
-                        (*ids, process)):
-                    grouped.setdefault(sample_id, []).append(
-                        {"position": position, "identity": identity,
-                         "payload": _decode(payload, f"进程 {identity} 样本")})
+                grouped = self._process_rows(
+                    connection, [sample["sample_id"] for sample in samples],
+                    process, budget)
                 for sample in samples:
                     sample["processes"] = grouped.get(sample["sample_id"], [])
             gaps = self._gaps(connection, since, until, budget)
-            gap_count, oldest_gap_start = connection.execute(
-                "SELECT COUNT(*), MIN(start_at) FROM collector_gaps").fetchone()
             state = self._read_state(connection, budget)
             latest_run = self._latest_run(connection, state, budget)
             active_run = self._active_run(connection, state, budget)
@@ -736,35 +815,9 @@ class SampleStore:
                 "gap_history_degraded")
             sources = self._sources(connection, budget)
             stats = self._database_stats(connection, self.store.database_path)
+            reference = until if until is not None else now
+            gap_history = self._gap_history(connection, state, latest_run, reference)
         life = self._lifecycle(state, active_run, latest_run, now)
-        history, history_source = self._effective_history(latest_run)
-        gap_rules = history["gaps"]
-        declared = self._history()
-        pruned_through = state["history"].get("gap_pruned_through")
-        reference = until if until is not None else now
-        complete_since = reference - gap_rules["retention_hours"] * 3600
-        if pruned_through is not None:
-            # 已删除的缺口不能因为调大保留期重新变成“完整”：水位不低于被删缺口的
-            # 最大结束时间，查询窗口从水位之后才算完整。
-            complete_since = max(complete_since, pruned_through)
-        count_limited = gap_count >= gap_rules["records"]
-        if count_limited and oldest_gap_start is not None:
-            # 条数淘汰只保留最老的已关闭缺口；再早的区间可能已经缺记录。
-            complete_since = max(complete_since, oldest_gap_start)
-        gap_history = {
-            "retention_hours": gap_rules["retention_hours"],
-            "retention_source": history_source,
-            "complete_since": complete_since,
-            "count_limit": gap_rules["records"],
-            "count_limited": count_limited,
-            "pruned_through": pruned_through,
-            "declared_retention_hours": declared["gaps"]["retention_hours"],
-            "declared_count_limit": declared["gaps"]["records"],
-            "hard_count_limit": GAP_ABSOLUTE_LIMIT,
-            "over_target": gap_count > gap_rules["records"],
-            "gap_history_degraded": state["history"].get("gap_history_degraded"),
-            "semantics": "缺口早于 complete_since 可能已淘汰；该时间前无缺口不等于连续",
-        }
         latest_processes["within_window"] = (
             latest_processes["observed_at"] is not None
             and (since is None or latest_processes["observed_at"] >= since))
@@ -1029,6 +1082,38 @@ class SampleStore:
             raise DatabaseError("运行配置证据损坏")
         sampling = policy.get("sampling")
         return sampling if isinstance(sampling, dict) else None
+
+    def _gap_history(self, connection, state, latest_run, reference):
+        """缺口记录的完整起点与生效/声明保留设置，供 samples 与 changes 共用。"""
+        history, history_source = self._effective_history(latest_run)
+        gap_rules = history["gaps"]
+        declared = self._history()
+        pruned_through = state["history"].get("gap_pruned_through")
+        gap_count, oldest_gap_start = connection.execute(
+            "SELECT COUNT(*), MIN(start_at) FROM collector_gaps").fetchone()
+        complete_since = reference - gap_rules["retention_hours"] * 3600
+        if pruned_through is not None:
+            # 已删除的缺口不能因为调大保留期重新变成“完整”：水位不低于被删缺口的
+            # 最大结束时间，查询窗口从水位之后才算完整。
+            complete_since = max(complete_since, pruned_through)
+        count_limited = gap_count >= gap_rules["records"]
+        if count_limited and oldest_gap_start is not None:
+            # 条数淘汰只保留最老的已关闭缺口；再早的区间可能已经缺记录。
+            complete_since = max(complete_since, oldest_gap_start)
+        return {
+            "retention_hours": gap_rules["retention_hours"],
+            "retention_source": history_source,
+            "complete_since": complete_since,
+            "count_limit": gap_rules["records"],
+            "count_limited": count_limited,
+            "pruned_through": pruned_through,
+            "declared_retention_hours": declared["gaps"]["retention_hours"],
+            "declared_count_limit": declared["gaps"]["records"],
+            "hard_count_limit": GAP_ABSOLUTE_LIMIT,
+            "over_target": gap_count > gap_rules["records"],
+            "gap_history_degraded": state["history"].get("gap_history_degraded"),
+            "semantics": "缺口早于 complete_since 可能已淘汰；该时间前无缺口不等于连续",
+        }
 
     def _retention(self, connection, state=None, budget=None, latest_run=None):
         budget = budget or self._budget()

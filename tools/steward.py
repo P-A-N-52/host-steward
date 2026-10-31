@@ -770,6 +770,28 @@ def main():
     samples.add_argument("--process", help="精确进程 identity，不按 PID 拼接不同生命周期")
     samples.add_argument("--raw", action="store_true", help="保留本页完整原始事实与错误明细")
     samples.add_argument("--output", help="在状态区外独占创建本页完整 JSON；不受终端输出预算裁剪")
+    changes_cli = commands.add_parser(
+        "changes", help="聚合资源历史变化，区分采集缺口与不可比断点")
+    changes_cli.add_argument("--state", required=True)
+    changes_cli.add_argument("--minutes", type=float, default=None,
+                             help="区间模式回看分钟数，默认 60")
+    changes_cli.add_argument("--since", type=float, help="固定窗口起点，Unix 秒")
+    changes_cli.add_argument("--until", type=float, help="固定窗口终点，Unix 秒")
+    changes_cli.add_argument("--from-sample", type=int, help="两点模式起点样本编号")
+    changes_cli.add_argument("--to-sample", type=int,
+                             help="两点模式终点样本编号；必须大于 --from-sample")
+    changes_cli.add_argument("--resource", action="append",
+                             help="cpu,memory,diskio,network,sources；可重复或逗号分隔")
+    changes_cli.add_argument("--process", help="精确进程 identity，只差分该进程序列")
+    changes_cli.add_argument("--limit", type=int, default=41,
+                             help="本页样本数，默认 41，最大 200；超限明确报错")
+    changes_cli.add_argument("--before", type=int,
+                             help="排除该样本编号及之后记录；需同时提供 --since/--until")
+    changes_cli.add_argument("--max-changes", type=int, default=200,
+                             help="变化条目上限，默认 200")
+    changes_cli.add_argument("--raw", action="store_true", help="保留每对完整差分")
+    changes_cli.add_argument("--output",
+                             help="在状态区外独占创建完整 JSON；不受终端输出预算裁剪")
     check = commands.add_parser("check", help="列出或运行本机约定授权的自定义检查脚本")
     check.add_argument("--state", required=True)
     selection = check.add_mutually_exclusive_group()
@@ -837,8 +859,37 @@ def main():
               "policy_evidence": store.policy_evidence,
               "maintenance": "observation only until directory rules are explicitly configured"})
         return
-    if args.action in ["status", "samples"]:
+    if args.action in ["status", "samples", "changes"]:
         store, policy, context = load_readonly(args.state)
+        if args.action == "changes":
+            from resource_query import changes_report, fit_changes_output
+            report = changes_report(
+                store, minutes=args.minutes, since=args.since, until=args.until,
+                limit=args.limit, before=args.before, process=args.process,
+                resources=args.resource, raw=args.raw,
+                from_sample=args.from_sample, to_sample=args.to_sample,
+                max_changes=args.max_changes)
+            report.setdefault("status", "resource_changes")
+            report.update(context)
+            if args.output:
+                from storage_tools import _output_path, _write_output
+                path = _output_path(store, args.output)
+                payload = encode(report)
+                _write_output(path, payload)
+                receipt = {"status": "resource_changes_exported",
+                           "output": str(path), "bytes": len(payload),
+                           "raw": args.raw, "mode": report["mode"],
+                           "changes": len(report.get("changes") or []),
+                           "next_before": report.get("next_before"), **context}
+                emit(receipt, store.limits["output_bytes"])
+                return
+            report = fit_changes_output(report, store.limits["output_bytes"])
+            emit(report, store.limits["output_bytes"])
+            if (report.get("output_limited")
+                    or report.get("pagination_blocked_by_output")
+                    or report.get("status") == "output_limited"):
+                raise SystemExit(2)
+            return
         if args.action == "status":
             report = status_report(store, policy, limit=args.limit, offset=args.offset, path=args.path)
             report.update(context)
