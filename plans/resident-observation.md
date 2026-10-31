@@ -2,17 +2,17 @@
 
 日期：2026-10-24，Asia/Shanghai。
 
-状态：实施中。阶段 0–2 的资源采集第一里程碑已在 macOS 完成实机验收；阶段 3（可恢复文件基线）已实机验收；阶段 4（事件待复核范围）已实现并完成 macOS 正式 CLI 快验，Linux/K6 未验证；未标明通过的项目仍待验收，不代表已经部署或长期切换。
+状态：实施中（本文件保留 2026-10-24 的计划与阶段记录）。截至 2026-10-31：阶段 0–3 已在 macOS 与 Linux/K6 完成正式 CLI 主路径验收（常驻采集在 K6 为短时验证）；阶段 4（事件待复核范围）在 macOS 完成正式 CLI 快验，Linux 按 `snapshot_only` 退化并已在 K6 验证；阶段 5–6 未完成验收，常驻服务部署与长时间运行仍未验证。当前能力与两平台验收状态的唯一来源见 [design.md 第 8 节](../design.md#8-当前实现范围与能力状态)；下文保留各阶段当时的记录。
 
 ## 实施进度与证据
 
 - 阶段 0：macOS 基线修复后 237 项历史测试通过；主代理用 20 次正式 CLI 调用核对历史淘汰、scope、原子替换、身份闩锁、root 不可见与失败保留，独立 SQLite 完整性为 `ok`。48 小时淘汰只做构造时间测试，未进行 48 小时实机等待。
-- 阶段 1：逐 root 配置 v2、scope 2 与 v1 兼容已实现。主代理 19 次 macOS 正式 CLI 调用验证真实中文/空格路径、别名、深度 0/多级、相对排除、配置证据、不可见及非目录 root；跨卷与 Linux/K6 实际路径仍未验收。
+- 阶段 1：逐 root 配置 v2、scope 2 与 v1 兼容已实现。主代理 19 次 macOS 正式 CLI 调用验证真实中文/空格路径、别名、深度 0/多级、相对排除、配置证据、不可见及非目录 root；跨卷与 Linux/K6 实际路径仍未验收。（现状补充：K6 后续已完成双 root 与跨卷 root 的实际路径验收，见 `references/field-resident-observation-2026-10-24/k6/README.md`；本条保留阶段 1 当时的记录。）
 - 显式升级：主代理从仓库已提交版本的正式 CLI 建立临时旧状态，执行新 `upgrade` 并逐数据集独立读回一致。schema 1 外部备份保留原配置字节，旧工具可读备份、明确拒绝 schema 2；这是兼容性核对，不是运行中回退演练。
-- 阶段 2：常驻采集闭环已实现并接入正式 CLI。macOS 实测：默认 15 秒间隔连续 1095 秒 74/74 个完整样本、零失败零缺口，采集运行中 `samples`/`status` 无锁即时查询（实测约 0.1 秒），SIGTERM 优雅停止，SIGKILL 重启后 `unclean_stop` 缺口可见并在重启后关闭，配置损坏时采集暂停而历史按最后有效运行预算只读，恢复与热重载在批次边界切换运行记录，`records` 条数淘汰生效，备份包含 schema 2 资源历史表且完整性 `ok`；进程下钻 19 点（60 秒间隔）、网络计数单调、en0 计数与 `netstat` 口径一致；周期低于本机真实命令耗时（macOS `iostat -c 2` 约 1 秒）时整批按预算失败并记录缺口，不伪造样本。Linux 采集代码通过夹具测试但未在 K6 实机运行。证据：`references/field-resident-observation-2026-10-24/stage2/`（default-10min-full、faults）。阶段 3–6 未开始。
-- K6：本次非交互 SSH 认证被拒绝（2026-10-24 多次复核仍为 `Permission denied (publickey,password)`），未执行远程验收命令；不将本机夹具测试记作 Linux/K6 实机证据。等待用户恢复认证后补验。
-- 阶段 4：事件线索的待复核范围机制已实现。FSEvents 原有的周期历史读取增加有界路径线索（最多 64 条、8 KiB）与稳定事件 id，同路径/子树合并后写入 current 的 `event_recheck`，游标未推进时同一事件重放不刷新复核身份；复核子树仍有排队项时，新事件只记入 pending 并保留目录游标；完成时按扫描起点结算，pending 更大则不判 covered，下一轮重扫；超过 64 项向父目录聚合并记 `truncated`/`aggregated`。续扫按线索优先复核子树，复核仍由完整 pass 的 `compare` 判定变化，未完成 pass 不产生删除。历史失效、监听重建清空队列并产生 `history_invalid`/`baseline_rebuild` 缺口；不可用、游标待定与历史不完整在 `event_recheck.degraded` 明示并退回全量节奏。新增 34 项专项测试，全仓库 480 项通过。macOS 正式 CLI 快验：真实 FSEvents 线索命中 `data` 子树，1 条目预算下队列可见且下一轮优先覆盖，创建/替换/移动/删除各 1 项经 compare 检出；注入失效游标后出现 `history_invalid` 缺口并清空队列，损坏队列经 `patrol --discard-event-recheck` 恢复。Linux/K6 未实机验证；常驻监听仍未引入。
-- 阶段 3：可恢复文件基线已实现、实机验收并通过独立评审闭环。验收调查（M1）先证实续扫核心语义（游标跨轮推进、公平轮转、SIGKILL 接续、与 `files.scan` 逐字段一致、未扫完零误删）并找出 5 项缺陷（进度单行超限卡死、默认容量完成写入失败、排队目录消失每轮崩溃、活跃目录 mtime 活锁、损坏进度无重置入口）；修复（M3，7 个提交）逐一解决：`scan_progress` 按 root 分节存储（9000 文件实机 19 轮完成、单行最大 2024B）、消失目录清子树候选记 `GAP_VANISHED` 继续、mtime 限次重启且带覆盖缺口的 pass 一律不完整不参与删除判断（缺口进 `coverage_gaps` 并在 status 可见）、`patrol --discard-scan-progress` 重置入口、容量失败干净回滚加 sizing 估算。两轮独立评审各抓出一个删除误报回归（GAP_MTIME 完成基线、兄弟前缀缺口误清），均已修复并以"旧实现下测试失败"的方式锁定。全仓库 446 项测试通过；主检出实机冒烟（小预算 3 轮完成、删排队目录不崩、重置入口可用）通过。证据：`references/field-resident-observation-2026-10-24/stage3/`（m1-evidence、m3-fix-evidence、run_stage3_hardened.py）。已知取舍：持续写入的活跃目录在写入停止前不安装基线（保守不误报）；跨轮 pass 是不同时点拼合；非排队子项扫描期间被并发删除仍按原语义抛出。Linux/K6 未实机验证。
+- 阶段 2：常驻采集闭环已实现并接入正式 CLI。macOS 实测：默认 15 秒间隔连续 1095 秒 74/74 个完整样本、零失败零缺口，采集运行中 `samples`/`status` 无锁即时查询（实测约 0.1 秒），SIGTERM 优雅停止，SIGKILL 重启后 `unclean_stop` 缺口可见并在重启后关闭，配置损坏时采集暂停而历史按最后有效运行预算只读，恢复与热重载在批次边界切换运行记录，`records` 条数淘汰生效，备份包含 schema 2 资源历史表且完整性 `ok`；进程下钻 19 点（60 秒间隔）、网络计数单调、en0 计数与 `netstat` 口径一致；周期低于本机真实命令耗时（macOS `iostat -c 2` 约 1 秒）时整批按预算失败并记录缺口，不伪造样本。Linux 采集代码通过夹具测试但未在 K6 实机运行。证据：`references/field-resident-observation-2026-10-24/stage2/`（default-10min-full、faults）。阶段 3–6 未开始。（现状补充：阶段 2 完成时阶段 3–6 尚未开始；后续阶段 3/4 已实现并在两平台验收，K6 也完成短时 `collect` 验收，见文首状态说明与 design.md 能力表。）
+- K6：本次非交互 SSH 认证被拒绝（2026-10-24 多次复核仍为 `Permission denied (publickey,password)`），未执行远程验收命令；不将本机夹具测试记作 Linux/K6 实机证据。等待用户恢复认证后补验。（现状补充：当日稍后以密码认证完成 K6 实机验收，阶段 0–3、阶段 4 的 Linux 退化路径与短时常驻采集均已通过，记录见 `references/field-resident-observation-2026-10-24/k6/README.md`；本条保留认证阻塞时的记录。）
+- 阶段 4：事件线索的待复核范围机制已实现。FSEvents 原有的周期历史读取增加有界路径线索（最多 64 条、8 KiB）与稳定事件 id，同路径/子树合并后写入 current 的 `event_recheck`，游标未推进时同一事件重放不刷新复核身份；复核子树仍有排队项时，新事件只记入 pending 并保留目录游标；完成时按扫描起点结算，pending 更大则不判 covered，下一轮重扫；超过 64 项向父目录聚合并记 `truncated`/`aggregated`。续扫按线索优先复核子树，复核仍由完整 pass 的 `compare` 判定变化，未完成 pass 不产生删除。历史失效、监听重建清空队列并产生 `history_invalid`/`baseline_rebuild` 缺口；不可用、游标待定与历史不完整在 `event_recheck.degraded` 明示并退回全量节奏。新增 34 项专项测试，全仓库 480 项通过。macOS 正式 CLI 快验：真实 FSEvents 线索命中 `data` 子树，1 条目预算下队列可见且下一轮优先覆盖，创建/替换/移动/删除各 1 项经 compare 检出；注入失效游标后出现 `history_invalid` 缺口并清空队列，损坏队列经 `patrol --discard-event-recheck` 恢复。Linux/K6 未实机验证；常驻监听仍未引入。（现状补充：Linux 侧 `snapshot_only` 退化已在 K6 验证；原生实时监听仍未实现，见 design.md 能力表。）
+- 阶段 3：可恢复文件基线已实现、实机验收并通过独立评审闭环。验收调查（M1）先证实续扫核心语义（游标跨轮推进、公平轮转、SIGKILL 接续、与 `files.scan` 逐字段一致、未扫完零误删）并找出 5 项缺陷（进度单行超限卡死、默认容量完成写入失败、排队目录消失每轮崩溃、活跃目录 mtime 活锁、损坏进度无重置入口）；修复（M3，7 个提交）逐一解决：`scan_progress` 按 root 分节存储（9000 文件实机 19 轮完成、单行最大 2024B）、消失目录清子树候选记 `GAP_VANISHED` 继续、mtime 限次重启且带覆盖缺口的 pass 一律不完整不参与删除判断（缺口进 `coverage_gaps` 并在 status 可见）、`patrol --discard-scan-progress` 重置入口、容量失败干净回滚加 sizing 估算。两轮独立评审各抓出一个删除误报回归（GAP_MTIME 完成基线、兄弟前缀缺口误清），均已修复并以"旧实现下测试失败"的方式锁定。全仓库 446 项测试通过；主检出实机冒烟（小预算 3 轮完成、删排队目录不崩、重置入口可用）通过。证据：`references/field-resident-observation-2026-10-24/stage3/`（m1-evidence、m3-fix-evidence、run_stage3_hardened.py）。已知取舍：持续写入的活跃目录在写入停止前不安装基线（保守不误报）；跨轮 pass 是不同时点拼合；非排队子项扫描期间被并发删除仍按原语义抛出。Linux/K6 未实机验证。（现状补充：K6 已完成 1200 目录续扫、容量失败与重置入口验收，见 `references/field-resident-observation-2026-10-24/k6/README.md`；本条保留阶段 3 当时的记录。）
 
 原始操作、耗时和读回保存在已忽略的 `references/field-resident-observation-2026-10-24/`。现有 `.demo/`、`.local-state/` 保持原样；没有提交或推送本轮工作。
 
@@ -55,7 +55,7 @@
 
 ## 配置方案与跨平台路径
 
-2026-10-24 讨论确认采用可配置的目录范围、逐 root 深度与排除规则，并明确考虑 Linux／macOS 的路径差异。以下结构作为后续实现依据，尚未进入运行代码；默认值和新配置版本号在实现时确定。
+2026-10-24 讨论确认采用可配置的目录范围、逐 root 深度与排除规则，并明确考虑 Linux／macOS 的路径差异。以下结构作为后续实现依据，尚未进入运行代码；默认值和新配置版本号在实现时确定。（现状补充：roots 对象、逐 root 深度与排除项已在配置 v2 实现，见 `tools/policy.py` 与 `state/host.example.json`；下文保留当时的讨论原文。）
 
 ### 每台主机一份配置
 

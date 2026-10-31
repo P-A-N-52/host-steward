@@ -18,7 +18,9 @@ from observe import (command, parse_battery, parse_boottime, parse_gpu_statistic
                      parse_processes, parse_swapusage, parse_tcp_states, parse_thermal, parse_vm_counters,
                      sample_facts)
 from state import Store, StewardError, decode, encode, read_regular_bytes
-from steward import initialize, update_pending
+from state_schema import read_current
+import steward
+from steward import initialize, patrol, status_report, update_pending
 
 
 def dataset_snapshot(store, name, default=None):
@@ -1386,6 +1388,38 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(report["observation_gaps"], [])
         self.assertTrue(report["last_run"]["coverage_complete"])
         self.assertEqual(report["events"]["source"], "metadata_snapshot")
+
+    def test_patrol_and_status_report_tool_version_evidence(self):
+        host = {"system": "test", "architecture": "test", "cpu": {}, "memory": {"available": True}, "gpu": {},
+                "model_usage": {}, "storage": [], "processes": {"available": True, "items": []},
+                "services": {"available": True, "items": []}}
+        with patch("steward.observe", return_value=host), patch("steward.native_events", return_value={"available": False}):
+            report = patrol(self.store, self.policy)
+        self.assertEqual(report["tool_version"], steward.TOOL_VERSION)
+        self.assertEqual(report["last_run"]["tool_version"], steward.TOOL_VERSION)
+        self.assertEqual(self.store.read("current.json")["last_run"]["tool_version"], steward.TOOL_VERSION)
+        status = status_report(self.store, self.policy)
+        self.assertEqual(status["tool_version"], steward.TOOL_VERSION)
+        self.assertEqual(status["last_run_tool_version"], steward.TOOL_VERSION)
+
+    def test_state_schema_reads_legacy_last_run_and_rejects_invalid_tool_version(self):
+        legacy = {"version": 1, "last_run": {"observed_at": time.time(), "coverage_complete": True}}
+        self.store.write("current.json", legacy)
+        self.assertEqual(read_current(self.store)["last_run"], legacy["last_run"])
+        self.assertIsNone(status_report(self.store, self.policy)["last_run_tool_version"])
+        for value in ("0.2", "v0.2.0", 2, None, ""):
+            with self.subTest(value=value):
+                self.store.write("current.json", {"version": 1, "last_run": {"tool_version": value}})
+                with self.assertRaisesRegex(StewardError, "last_run.tool_version"):
+                    read_current(self.store)
+        self.store.write("current.json", {"version": 1, "last_run": {"tool_version": "bad"}})
+        before = dataset_snapshot(self.store, "current.json")
+        result = subprocess.run([sys.executable, str(PROJECT / "tools/steward.py"), "status",
+                                 "--state", str(self.store.path)],
+                                cwd="/", capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("last_run.tool_version", result.stderr)
+        self.assertEqual(dataset_snapshot(self.store, "current.json"), before)
 
     def test_restore_does_not_overwrite_file_created_after_plan(self):
         from unittest.mock import patch

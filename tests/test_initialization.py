@@ -42,7 +42,7 @@ class InitializationTests(unittest.TestCase):
         payloads = {"steward.sqlite3": Store.empty_database_bytes()}
         payloads.update(self._guidance())
         payloads["adaptation.json"] = encode(
-            {"source_version": "0.2.0", "removed_sections": [],
+            {"source_version": steward.TOOL_VERSION, "removed_sections": [],
              "reason": "保留通用说明；具体能力和权限以观测结果、本机约定为准"})
         payloads["host.json"] = encode(policy)
         return payloads
@@ -111,8 +111,31 @@ class InitializationTests(unittest.TestCase):
         self.assertEqual(outputs["status"]["change_count"], 0)
         self.assertEqual(outputs["status"]["recent_changes"], [])
         self.assertEqual(outputs["status"]["operations"], [])
+        self.assertEqual(outputs["status"]["tool_version"], steward.TOOL_VERSION)
+        self.assertIsNone(outputs["status"]["last_run_tool_version"])
         self.assertEqual(outputs["inventory"]["status"], "not_registered")
         self.assertEqual(outputs["inventory"]["total"], 0)
+
+    def test_initialization_reads_tool_version_from_single_constant(self):
+        directory = self.base / "version-single-source"
+        with patch.object(steward, "TOOL_VERSION", "9.9.9"):
+            initialize(directory, [self.root], "版本单一来源")
+        adaptation = decode((directory / "adaptation.json").read_bytes())
+        self.assertEqual(adaptation["source_version"], "9.9.9")
+        self.assertRegex(steward.TOOL_VERSION, r"^[0-9]+\.[0-9]+\.[0-9]+$")
+
+    def test_cli_init_report_and_adaptation_share_tool_version(self):
+        directory = self.base / "cli-version"
+        environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        result = subprocess.run(
+            [sys.executable, str(PROJECT / "tools/steward.py"), "init", "--state", str(directory),
+             "--root", str(self.root), "--purpose", "版本报告"],
+            cwd="/", capture_output=True, text=True, timeout=5, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["tool_version"], steward.TOOL_VERSION)
+        adaptation = decode((directory / "adaptation.json").read_bytes())
+        self.assertEqual(adaptation["source_version"], steward.TOOL_VERSION)
 
     def test_missing_host_preserves_existing_state_byte_for_byte(self):
         directory = self.base / "existing"
