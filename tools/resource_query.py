@@ -602,6 +602,986 @@ def history_report(store, *, minutes=10, since=None, until=None,
     return result
 
 
+DEFAULT_CHANGES_MINUTES = 60
+DEFAULT_MAX_CHANGES = 200
+MAX_CHANGES_LIMIT = 10000
+CHANGE_TRACE_LIMIT = 16
+CHANGE_RESOURCES = ("cpu", "memory", "diskio", "network", "sources")
+# 新增字段不升版本；只有破坏性变更才升 version。
+RESOURCE_CHANGES_CONTRACT = {"name": "host-steward.resource_changes", "version": 1}
+_CPU_COUNTERS = ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal")
+_DEVICE_UNITS = {
+    "diskio": {"read_bytes": "bytes", "write_bytes": "bytes",
+               "mb_per_second": "mb_per_second", "transfers_per_second": "per_second",
+               "kb_per_transfer": "kb"},
+    "network": {"ibytes": "bytes", "obytes": "bytes", "ipackets": "count",
+                "opackets": "count", "ierrs": "count", "oerrs": "count"},
+}
+_DEVICE_IDENTITY_FIELDS = frozenset({"name", "identity", "major", "minor",
+                                     "ifindex", "generation"})
+
+
+def _change_number(value):
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _change_resources(values):
+    if values is None:
+        return tuple(CHANGE_RESOURCES)
+    selected = []
+    for value in values:
+        for item in str(value).split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if item not in CHANGE_RESOURCES:
+                raise StewardError("changes --resource 只接受 " + "、".join(CHANGE_RESOURCES)
+                                   + "；可重复传入或用逗号分隔")
+            if item not in selected:
+                selected.append(item)
+    return tuple(selected) or tuple(CHANGE_RESOURCES)
+
+
+def _available_flag(section):
+    if not isinstance(section, dict):
+        return None
+    value = section.get("available")
+    return value if type(value) is bool else None
+
+
+def _coverage_flags(section, kind):
+    """只投影会改变“这个列表能否代表完整集合”的字段。"""
+    if not isinstance(section, dict):
+        return None
+    layers = [section]
+    if kind == "network" and isinstance(section.get("interfaces"), dict):
+        layers.append(section["interfaces"])
+    flags = {}
+    for key in ("complete", "partial", "truncated", "observed", "returned", "limit"):
+        for layer in layers:
+            if key in layer:
+                flags[key] = layer[key]
+    return flags or None
+
+
+def _trace_point(sample, value):
+    return {"sample_id": sample["sample_id"], "observed_at": sample["observed_at"],
+            "run_id": sample.get("run_id"), "value": value}
+
+
+def _bounded_points(points, limit=CHANGE_TRACE_LIMIT):
+    if len(points) <= limit:
+        return points, 0
+    head = (limit + 1) // 2
+    tail = limit - head
+    return points[:head] + (points[-tail:] if tail else []), len(points) - limit
+
+
+def _unique_run_ids(samples):
+    values = []
+    for sample in samples:
+        run_id = sample.get("run_id")
+        if run_id and run_id not in values:
+            values.append(run_id)
+    return values
+
+
+def _value_observation(resource, path, unit, before, after, *, counter=False):
+    delta, reason = None, None
+    if _change_number(before) and _change_number(after):
+        delta = after - before
+        changed = delta != 0
+        if counter and delta < 0:
+            reason, delta = "counter_reset", None
+    else:
+        changed = before != after
+    return {"resource": resource, "path": path, "kind": "value_change", "unit": unit,
+            "before": before, "after": after, "delta": delta,
+            "counter": counter, "changed": changed, "reason": reason}
+
+
+def _discrete_descriptor(resource, path, kind, *, before=None, after=None, unit=None,
+                         reason=None, object_name=None):
+    return {"resource": resource, "path": path, "kind": kind, "unit": unit,
+            "before": before, "after": after, "delta": None, "reason": reason,
+            "object": object_name}
+
+
+def _cpu_observations(before, after):
+    if isinstance(before, dict) and before.get("available") is False:
+        return []
+    if isinstance(after, dict) and after.get("available") is False:
+        return []
+    before = before if isinstance(before, dict) else {}
+    after = after if isinstance(after, dict) else {}
+    observations = []
+    old_counters, new_counters = before.get("counters"), after.get("counters")
+    if isinstance(old_counters, dict) and isinstance(new_counters, dict):
+        for field in _CPU_COUNTERS:
+            old_value, new_value = old_counters.get(field), new_counters.get(field)
+            if _change_number(old_value) and _change_number(new_value):
+                observations.append(_value_observation(
+                    "cpu", f"cpu.counters.{field}", "ticks",
+                    old_value, new_value, counter=True))
+    old_util, new_util = before.get("utilization"), after.get("utilization")
+    if isinstance(old_util, dict) and isinstance(new_util, dict) \
+            and old_util.get("available") is not False \
+            and new_util.get("available") is not False:
+        for field in ("idle_percent", "user_percent", "system_percent"):
+            old_value, new_value = old_util.get(field), new_util.get(field)
+            if _change_number(old_value) and _change_number(new_value):
+                observations.append(_value_observation(
+                    "cpu", f"cpu.utilization.{field}", "percent",
+                    old_value, new_value))
+    return observations
+
+
+def _memory_observations(before, after):
+    if isinstance(before, dict) and before.get("available") is False:
+        return []
+    if isinstance(after, dict) and after.get("available") is False:
+        return []
+    before = before if isinstance(before, dict) else {}
+    after = after if isinstance(after, dict) else {}
+    observations = []
+    for field in ("total_bytes", "available_bytes"):
+        old_value, new_value = before.get(field), after.get(field)
+        if _change_number(old_value) and _change_number(new_value):
+            observations.append(_value_observation(
+                "memory", f"memory.{field}", "bytes", old_value, new_value))
+    old_swap, new_swap = before.get("swap"), after.get("swap")
+    if isinstance(old_swap, dict) and isinstance(new_swap, dict) \
+            and old_swap.get("available") is not False \
+            and new_swap.get("available") is not False:
+        old_value, new_value = old_swap.get("used_bytes"), new_swap.get("used_bytes")
+        if _change_number(old_value) and _change_number(new_value):
+            observations.append(_value_observation(
+                "memory", "memory.swap.used_bytes", "bytes", old_value, new_value))
+    return observations
+
+
+def _device_base(kind, name):
+    if kind == "diskio":
+        return f"diskio.disks.{name}"
+    return f"network.interfaces.{name}"
+
+
+def _device_rows(section, kind):
+    if not isinstance(section, dict):
+        return {}
+    if kind == "network":
+        interfaces = section.get("interfaces")
+        rows = interfaces.get("items") if isinstance(interfaces, dict) else None
+    else:
+        rows = section.get("disks", section.get("devices"))
+    return {row["name"]: row for row in rows or []
+            if isinstance(row, dict) and isinstance(row.get("name"), str)}
+
+
+def _device_identity(row):
+    if not isinstance(row, dict):
+        return None
+    return {key: row.get(key) for key in
+            ("identity", "major", "minor", "ifindex", "generation") if key in row}
+
+
+def _device_observations(change_section, before_section, after_section, kind):
+    if not isinstance(change_section, dict):
+        return [], []
+    old_rows = _device_rows(before_section, kind)
+    new_rows = _device_rows(after_section, kind)
+    units = _DEVICE_UNITS.get(kind, {})
+    observations, discrete = [], []
+    for item in change_section.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str):
+            continue
+        base = _device_base(kind, name)
+        reason = item.get("reason")
+        if item.get("comparable") and isinstance(item.get("counter_delta"), dict):
+            old_row, new_row = old_rows.get(name, {}), new_rows.get(name, {})
+            for field in item["counter_delta"]:
+                old_value, new_value = old_row.get(field), new_row.get(field)
+                if _change_number(old_value) and _change_number(new_value):
+                    observations.append(_value_observation(
+                        kind, f"{base}.{field}", units.get(field, "number"),
+                        old_value, new_value, counter=True))
+            continue
+        if reason in ("object_added", "object_not_observed"):
+            added = reason == "object_added"
+            row = new_rows.get(name) if added else old_rows.get(name)
+            value = row.get("name") if isinstance(row, dict) else name
+            discrete.append(_discrete_descriptor(
+                kind, base, "object_added" if added else "object_not_observed",
+                before=None if added else value, after=value if added else None,
+                reason=reason, object_name=name))
+            continue
+        if reason == "counter_reset":
+            old_row, new_row = old_rows.get(name, {}), new_rows.get(name, {})
+            for field in units:
+                old_value, new_value = old_row.get(field), new_row.get(field)
+                if _change_number(old_value) and _change_number(new_value):
+                    observations.append(_value_observation(
+                        kind, f"{base}.{field}", units[field],
+                        old_value, new_value, counter=True))
+            continue
+        if reason == "instantaneous_measurement":
+            old_row, new_row = old_rows.get(name, {}), new_rows.get(name, {})
+            for field in sorted((set(old_row) & set(new_row)) - _DEVICE_IDENTITY_FIELDS):
+                old_value, new_value = old_row.get(field), new_row.get(field)
+                if _change_number(old_value) and _change_number(new_value):
+                    observations.append(_value_observation(
+                        kind, f"{base}.{field}", units.get(field, "number"),
+                        old_value, new_value))
+            continue
+        if reason == "object_identity_changed":
+            discrete.append(_discrete_descriptor(
+                kind, f"{base}.identity", "coverage_change",
+                before=_device_identity(old_rows.get(name)),
+                after=_device_identity(new_rows.get(name)),
+                reason=reason, object_name=name))
+            continue
+        if reason in ("entered_bounded_snapshot", "left_bounded_snapshot"):
+            discrete.append(_discrete_descriptor(
+                kind, f"{kind}.coverage", "coverage_change",
+                before=name in old_rows, after=name in new_rows,
+                reason=reason, object_name=name))
+            continue
+        if reason:
+            discrete.append(_discrete_descriptor(
+                kind, f"{base}.coverage", "coverage_change", reason=reason,
+                before=name in old_rows, after=name in new_rows, object_name=name))
+    return observations, discrete
+
+
+def _source_observations(before_sources, after_sources):
+    old = before_sources if isinstance(before_sources, dict) else {}
+    new = after_sources if isinstance(after_sources, dict) else {}
+    result = []
+    for name in sorted(set(old) | set(new)):
+        if not isinstance(name, str):
+            continue
+        old_row, new_row = old.get(name), new.get(name)
+        old_available = old_row.get("available") if isinstance(old_row, dict) else None
+        new_available = new_row.get("available") if isinstance(new_row, dict) else None
+        if name not in old:
+            result.append(_discrete_descriptor(
+                "sources", f"sources.{name}.available", "object_added",
+                after=new_available, unit="bool", reason="source_first_observed",
+                object_name=name))
+        elif name not in new:
+            result.append(_discrete_descriptor(
+                "sources", f"sources.{name}.available", "object_not_observed",
+                before=old_available, unit="bool", reason="source_not_observed",
+                object_name=name))
+        elif old_available != new_available:
+            result.append(_discrete_descriptor(
+                "sources", f"sources.{name}.available", "availability_change",
+                before=old_available, after=new_available, unit="bool",
+                reason="availability_changed", object_name=name))
+    return result
+
+
+def _process_available(view):
+    if not isinstance(view, dict):
+        return None
+    value = view.get("available")
+    return value if type(value) is bool else None
+
+
+def _process_value_map(view):
+    rows = view.get("items") if isinstance(view, dict) else None
+    result = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        identity = row.get("identity")
+        if not isinstance(identity, str):
+            continue
+        ticks = row.get("cpu_ticks")
+        if isinstance(ticks, dict):
+            ticks = ticks.get("total")
+        result[identity] = {"rss_bytes": row.get("rss_bytes"), "cpu_ticks": ticks}
+    return result
+
+
+def _process_observations(change_section, before_view, after_view, process):
+    if process is None or not isinstance(change_section, dict):
+        return [], []
+    if not change_section.get("comparable"):
+        reason = change_section.get("reason")
+        if reason == "process_changes_not_loaded":
+            return [], []
+        before_available = _process_available(before_view)
+        after_available = _process_available(after_view)
+        if reason == "source_unavailable" and before_available is None \
+                and after_available is None:
+            reason = (before_view or {}).get("reason") \
+                or (after_view or {}).get("reason") \
+                or "process_snapshot_not_observed"
+        if before_available is not None or after_available is not None:
+            return [], [_discrete_descriptor(
+                "processes", "processes.available", "availability_change",
+                before=before_available, after=after_available, unit="bool",
+                reason=reason)]
+        return [], [_discrete_descriptor(
+            "processes", "processes.coverage", "coverage_change",
+            before=before_available, after=after_available,
+            reason=reason or "process_snapshot_incomplete")]
+    old_values = _process_value_map(before_view)
+    new_values = _process_value_map(after_view)
+    observations, discrete = [], []
+    for item in change_section.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        identity = item.get("identity")
+        if not isinstance(identity, str):
+            continue
+        base = f"processes.{identity}"
+        if item.get("comparable"):
+            old_value = old_values.get(identity, {})
+            new_value = new_values.get(identity, {})
+            for field, unit, counter in (("rss_bytes", "bytes", False),
+                                         ("cpu_ticks", "ticks", True)):
+                old_ticks, new_ticks = old_value.get(field), new_value.get(field)
+                if _change_number(old_ticks) and _change_number(new_ticks):
+                    observations.append(_value_observation(
+                        "processes", f"{base}.{field}", unit,
+                        old_ticks, new_ticks, counter=counter))
+            continue
+        reason = item.get("reason")
+        if reason in ("process_added", "process_not_observed"):
+            added = reason == "process_added"
+            discrete.append(_discrete_descriptor(
+                "processes", base, "object_added" if added else "object_not_observed",
+                before=None if added else identity, after=identity if added else None,
+                reason=reason, object_name=identity))
+            continue
+        if reason:
+            discrete.append(_discrete_descriptor(
+                "processes", f"{base}.coverage", "coverage_change",
+                before=identity in old_values, after=identity in new_values,
+                reason=reason, object_name=identity))
+    return observations, discrete
+
+
+def _pair_observations(before, after, change, *, resources, process,
+                       before_view, after_view):
+    old_host = before.get("host") if isinstance(before.get("host"), dict) else {}
+    new_host = after.get("host") if isinstance(after.get("host"), dict) else {}
+    observations, discrete = [], []
+    for name in ("cpu", "memory", "diskio", "network"):
+        if name not in resources:
+            continue
+        old_available = _available_flag(old_host.get(name))
+        new_available = _available_flag(new_host.get(name))
+        if old_available != new_available:
+            discrete.append(_discrete_descriptor(
+                name, f"{name}.available", "availability_change",
+                before=old_available, after=new_available, unit="bool",
+                reason="source_availability_changed"))
+        if name in ("diskio", "network"):
+            old_coverage = _coverage_flags(old_host.get(name), name)
+            new_coverage = _coverage_flags(new_host.get(name), name)
+            if old_coverage != new_coverage and (old_coverage or new_coverage):
+                discrete.append(_discrete_descriptor(
+                    name, f"{name}.coverage", "coverage_change",
+                    before=old_coverage, after=new_coverage,
+                    reason="coverage_changed"))
+        section_change = change.get(name)
+        if isinstance(section_change, dict) and not section_change.get("comparable") \
+                and section_change.get("reason") == "source_unavailable" \
+                and old_available is True and new_available is True:
+            # host 段自称可用但对象列表缺失时，也要明确覆盖不可比。
+            discrete.append(_discrete_descriptor(
+                name, f"{name}.coverage", "coverage_change",
+                reason="object_list_missing"))
+    if "cpu" in resources:
+        observations += _cpu_observations(old_host.get("cpu"), new_host.get("cpu"))
+    if "memory" in resources:
+        observations += _memory_observations(
+            old_host.get("memory"), new_host.get("memory"))
+    if "diskio" in resources:
+        found, events = _device_observations(
+            change.get("diskio"), old_host.get("diskio"),
+            new_host.get("diskio"), "diskio")
+        observations += found
+        discrete += events
+    if "network" in resources:
+        found, events = _device_observations(
+            change.get("network"), old_host.get("network"),
+            new_host.get("network"), "network")
+        observations += found
+        discrete += events
+    if "sources" in resources:
+        discrete += _source_observations(
+            before.get("sources"), after.get("sources"))
+    found, events = _process_observations(
+        change.get("processes"), before_view, after_view, process)
+    observations += found
+    discrete += events
+    return observations, discrete
+
+
+def _change_entry(descriptor, from_sample, to_sample):
+    entry = {
+        "resource": descriptor["resource"],
+        "field": descriptor["path"],
+        "path": descriptor["path"],
+        "kind": descriptor["kind"],
+        "unit": descriptor.get("unit"),
+        "before": descriptor.get("before"),
+        "after": descriptor.get("after"),
+        "delta": descriptor.get("delta"),
+        "first_sample_id": to_sample["sample_id"],
+        "first_observed_at": to_sample["observed_at"],
+        "last_sample_id": to_sample["sample_id"],
+        "last_observed_at": to_sample["observed_at"],
+        "baseline_sample_id": from_sample["sample_id"],
+        "baseline_observed_at": from_sample["observed_at"],
+        "run_ids": _unique_run_ids([from_sample, to_sample]),
+        "samples": [_trace_point(from_sample, descriptor.get("before")),
+                    _trace_point(to_sample, descriptor.get("after"))],
+        "samples_omitted": 0,
+        "continuity": {"comparable": True, "reasons": []},
+    }
+    if descriptor.get("reason"):
+        entry["reason"] = descriptor["reason"]
+    if descriptor.get("object"):
+        entry["object"] = descriptor["object"]
+    return entry
+
+
+def _new_episode(pair, observation, direction):
+    return {"resource": observation["resource"], "path": observation["path"],
+            "unit": observation.get("unit"), "direction": direction,
+            "before": observation["before"], "after": observation["after"],
+            "baseline_sample": pair["from_sample"],
+            "points": [_trace_point(pair["to_sample"], observation["after"])],
+            "pairs": 1,
+            "run_ids": _unique_run_ids([pair["from_sample"], pair["to_sample"]])}
+
+
+def _extend_episode(episode, pair, observation):
+    episode["after"] = observation["after"]
+    episode["points"].append(_trace_point(pair["to_sample"], observation["after"]))
+    episode["pairs"] += 1
+    for run_id in _unique_run_ids([pair["from_sample"], pair["to_sample"]]):
+        if run_id not in episode["run_ids"]:
+            episode["run_ids"].append(run_id)
+
+
+def _episode_entry(episode):
+    points = [_trace_point(episode["baseline_sample"], episode["before"])] \
+        + episode["points"]
+    samples, omitted = _bounded_points(points)
+    first, last = episode["points"][0], episode["points"][-1]
+    entry = {
+        "resource": episode["resource"], "field": episode["path"],
+        "path": episode["path"], "kind": "value_change", "unit": episode["unit"],
+        "before": episode["before"], "after": episode["after"],
+        "delta": episode["after"] - episode["before"],
+        "first_sample_id": first["sample_id"],
+        "first_observed_at": first["observed_at"],
+        "last_sample_id": last["sample_id"],
+        "last_observed_at": last["observed_at"],
+        "baseline_sample_id": episode["baseline_sample"]["sample_id"],
+        "baseline_observed_at": episode["baseline_sample"]["observed_at"],
+        "run_ids": episode["run_ids"][:CHANGE_TRACE_LIMIT],
+        "samples": samples, "samples_omitted": omitted,
+        "continuity": {"comparable": True, "reasons": []},
+        "pairs": episode["pairs"],
+        "direction": "increase" if episode["direction"] > 0 else "decrease",
+    }
+    if len(episode["run_ids"]) > CHANGE_TRACE_LIMIT:
+        entry["run_ids_omitted"] = len(episode["run_ids"]) - CHANGE_TRACE_LIMIT
+    return entry
+
+
+def _discontinuity_entry(pair):
+    continuity = pair["change"]["continuity"]
+    return {"from_sample_id": pair["from_sample"]["sample_id"],
+            "from_observed_at": pair["from_sample"]["observed_at"],
+            "to_sample_id": pair["to_sample"]["sample_id"],
+            "to_observed_at": pair["to_sample"]["observed_at"],
+            "reasons": list(continuity.get("reasons") or []),
+            "interval_seconds": continuity.get("interval_seconds")}
+
+
+def _count_changes(changes):
+    by_resource, by_kind, episodes = {}, {}, 0
+    for row in changes:
+        resource, kind = row.get("resource"), row.get("kind")
+        by_resource[resource] = by_resource.get(resource, 0) + 1
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+        if kind == "value_change" and row.get("pairs"):
+            episodes += 1
+    return {"by_resource": by_resource, "by_kind": by_kind, "episodes": episodes}
+
+
+def _aggregate_changes(pairs, max_changes):
+    changes, discontinuities = [], []
+    open_episodes = {}
+    for pair in pairs:
+        if not pair["comparable"]:
+            changes.extend(_episode_entry(episode)
+                           for episode in open_episodes.values())
+            open_episodes.clear()
+            discontinuities.append(_discontinuity_entry(pair))
+            continue
+        observed_paths = {item["path"] for item in pair["observations"]}
+        for path in list(open_episodes):
+            if path not in observed_paths:
+                changes.append(_episode_entry(open_episodes.pop(path)))
+        for observation in pair["observations"]:
+            path = observation["path"]
+            episode = open_episodes.get(path)
+            if not observation["changed"]:
+                if episode is not None:
+                    changes.append(_episode_entry(open_episodes.pop(path)))
+                continue
+            if observation.get("delta") is None:
+                # 计数器回退：结束旧 episode，回退本身作为单点变化保留。
+                if episode is not None:
+                    changes.append(_episode_entry(open_episodes.pop(path)))
+                changes.append(_change_entry(
+                    observation, pair["from_sample"], pair["to_sample"]))
+                continue
+            direction = 1 if observation["delta"] > 0 else -1
+            if episode is not None and episode["direction"] == direction:
+                _extend_episode(episode, pair, observation)
+            else:
+                if episode is not None:
+                    changes.append(_episode_entry(open_episodes.pop(path)))
+                open_episodes[path] = _new_episode(pair, observation, direction)
+        for descriptor in pair["discrete"]:
+            changes.append(_change_entry(
+                descriptor, pair["from_sample"], pair["to_sample"]))
+    changes.extend(_episode_entry(episode) for episode in open_episodes.values())
+    changes.sort(key=lambda row: (row["first_observed_at"], row["resource"],
+                                  row["path"], row["kind"]))
+    counts = _count_changes(changes)
+    total = len(changes)
+    omitted = max(0, total - max_changes)
+    return (changes[:max_changes] if omitted else changes,
+            discontinuities, total, omitted, counts)
+
+
+def _changes_summary(counts, total, omitted, discontinuities, gaps, process,
+                     evaluated_samples, evaluated_pairs, boundary):
+    reasons = {}
+    for row in discontinuities:
+        for reason in row.get("reasons") or []:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    summary = {
+        "evaluated_samples": evaluated_samples,
+        "evaluated_pairs": evaluated_pairs,
+        "changes_evaluated": total,
+        "changes_returned": total - omitted,
+        "changes_omitted": omitted,
+        "episodes": counts["episodes"],
+        "by_resource": counts["by_resource"],
+        "by_kind": counts["by_kind"],
+        "discontinuity_count": len(discontinuities),
+        "discontinuity_reasons": reasons,
+        "gap_count": len(gaps),
+        "boundary_status": boundary.get("status"),
+        "boundary_in_window": boundary.get("in_window"),
+        "scope": "changes 只描述已保存样本之间的观测变化；gaps 是采集缺口，"
+                 "discontinuities 是不可比原因；episode 在同一 (resource,path) 的"
+                 "连续可比对中合并，稳定、反向或计数器回退时断开",
+    }
+    if process is None:
+        summary.update(process_changes_loaded=False,
+                       process_changes_not_loaded=True,
+                       process_changes_reason="process_changes_not_loaded")
+    else:
+        summary["process_changes_loaded"] = True
+    return summary
+
+
+def _sample_ref(sample):
+    return {"sample_id": sample["sample_id"], "observed_at": sample["observed_at"],
+            "run_id": sample.get("run_id"), "boot": sample.get("boot"),
+            "monotonic_at": sample.get("monotonic_at")}
+
+
+def _changes_boundary(sample_store, page, since, until, process):
+    raw = _boundary_report(sample_store, page, since, until, process,
+                           lambda sample: _process_view(sample, process))
+    boundary = {key: raw.get(key) for key in (
+        "status", "page_oldest_sample_id", "page_oldest_observed_at",
+        "predecessor_sample_id", "predecessor_observed_at", "in_window")}
+    change = raw.get("change") if isinstance(raw.get("change"), dict) else None
+    boundary["comparable"] = None if change is None \
+        else change["continuity"]["comparable"]
+    boundary["reasons"] = [] if change is None \
+        else list(change["continuity"].get("reasons") or [])
+    boundary["included_in_changes"] = False
+    boundary["note"] = ("边界前驱只用于说明页首接缝，不并入本页 changes 或 episode；"
+                        "需要跨页衔接时用 --before 读取更早一页，或按 first/last_sample_id 对齐")
+    return boundary
+
+
+def _bounded_gaps(gaps):
+    return [dict(row, detail=_context_summary(
+        row.get("detail"), byte_limit=1024, text_limit=256, max_items=12))
+        for row in gaps]
+
+
+def _range_changes_report(store, *, minutes, since, until, limit, before, process,
+                          resources, raw, max_changes):
+    explicit_since = since is not None
+    minutes = DEFAULT_CHANGES_MINUTES if minutes is None else minutes
+    if type(minutes) not in (int, float) or not math.isfinite(minutes) or minutes <= 0:
+        raise StewardError("changes --minutes 必须是有限正数")
+    until = time.time() if until is None else until
+    since = until - minutes * 60 if since is None else since
+    sample_store = SampleStore(store)
+    page = sample_store.query(since, until, limit=limit, before=before, process=process)
+    chronological = list(reversed(page["samples"]))
+    pairs = []
+    for previous, current in zip(chronological, chronological[1:]):
+        previous_view = _process_view(previous, process)
+        current_view = _process_view(current, process)
+        change = resource_changes(
+            dict(previous, processes=previous_view),
+            dict(current, processes=current_view),
+            page["gaps"], page.get("gap_history"))
+        pair = {"from_sample": previous, "to_sample": current, "change": change,
+                "comparable": change["continuity"]["comparable"],
+                "observations": [], "discrete": []}
+        if pair["comparable"]:
+            pair["observations"], pair["discrete"] = _pair_observations(
+                previous, current, change, resources=resources, process=process,
+                before_view=previous_view, after_view=current_view)
+        pairs.append(pair)
+    changes, discontinuities, total, omitted, counts = _aggregate_changes(
+        pairs, max_changes)
+    boundary = _changes_boundary(sample_store, page, since, until, process)
+    gaps = _bounded_gaps(page["gaps"])
+    summary = _changes_summary(counts, total, omitted, discontinuities, gaps,
+                               process, len(chronological), len(pairs), boundary)
+    result = {
+        "status": "resource_changes",
+        "contract": dict(RESOURCE_CHANGES_CONTRACT),
+        "mode": "range",
+        "window": {"since": since, "until": until, "before": before,
+                   "minutes": None if explicit_since else minutes,
+                   "process": process, "resources": list(resources)},
+        "evaluated_samples": len(chronological),
+        "evaluated_pairs": len(pairs),
+        "changes": changes,
+        "changes_omitted": omitted,
+        "truncated": bool(page["truncated"] or omitted),
+        "next_before": page["next_before"],
+        "discontinuities": discontinuities,
+        "gaps": gaps,
+        "gap_history": dict(page["gap_history"]),
+        "boundary": boundary,
+        "summary": summary,
+        "page": {"limit": limit, "returned": len(page["samples"]),
+                 "truncated": bool(page["truncated"]),
+                 "evaluated": len(chronological)},
+        "raw": bool(raw),
+    }
+    if raw:
+        result["pairs"] = [{
+            "from_sample_id": pair["from_sample"]["sample_id"],
+            "to_sample_id": pair["to_sample"]["sample_id"],
+            "continuity": pair["change"]["continuity"],
+            "change": pair["change"],
+        } for pair in pairs]
+    return result
+
+
+def _pair_changes_report(store, from_sample, to_sample, *, process, resources,
+                         raw, max_changes):
+    pair = SampleStore(store).sample_pair(
+        from_sample, to_sample, process=process)
+    baseline, target = pair["baseline"], pair["target"]
+    baseline_view = _process_view(baseline, process)
+    target_view = _process_view(target, process)
+    change = resource_changes(
+        dict(baseline, processes=baseline_view),
+        dict(target, processes=target_view),
+        pair["gaps"], pair["gap_history"])
+    comparable = change["continuity"]["comparable"]
+    observations, discrete = ([], [])
+    if comparable:
+        observations, discrete = _pair_observations(
+            baseline, target, change, resources=resources, process=process,
+            before_view=baseline_view, after_view=target_view)
+    entries = [_change_entry(item, baseline, target)
+               for item in observations if item["changed"]]
+    entries += [_change_entry(item, baseline, target) for item in discrete]
+    entries.sort(key=lambda row: (row["resource"], row["path"], row["kind"]))
+    counts = _count_changes(entries)
+    total = len(entries)
+    omitted = max(0, total - max_changes)
+    changes = entries[:max_changes] if omitted else entries
+    discontinuities = [] if comparable else [{
+        "from_sample_id": baseline["sample_id"],
+        "from_observed_at": baseline["observed_at"],
+        "to_sample_id": target["sample_id"],
+        "to_observed_at": target["observed_at"],
+        "reasons": list(change["continuity"].get("reasons") or []),
+        "interval_seconds": change["continuity"].get("interval_seconds"),
+    }]
+    gaps = _bounded_gaps(pair["gaps"])
+    boundary = {"status": "pair_mode", "in_window": None, "comparable": None,
+                "included_in_changes": False,
+                "note": "两点模式直接比较 baseline 与 target，不做 episode 聚合"}
+    summary = _changes_summary(counts, total, omitted, discontinuities, gaps,
+                               process, 2, 1, boundary)
+    result = {
+        "status": "resource_changes",
+        "contract": dict(RESOURCE_CHANGES_CONTRACT),
+        "mode": "pair",
+        "pair": {"from_sample": from_sample, "to_sample": to_sample},
+        "baseline": _sample_ref(baseline),
+        "target": _sample_ref(target),
+        "evaluated_samples": 2,
+        "evaluated_pairs": 1,
+        "changes": changes,
+        "changes_omitted": omitted,
+        "truncated": bool(omitted),
+        "next_before": None,
+        "discontinuities": discontinuities,
+        "gaps": gaps,
+        "gap_history": dict(pair["gap_history"]),
+        "boundary": boundary,
+        "summary": summary,
+        "raw": bool(raw),
+    }
+    if raw:
+        result["change"] = change
+    return result
+
+
+def changes_report(store, *, minutes=None, since=None, until=None,
+                   limit=DEFAULT_HISTORY_LIMIT, before=None, process=None,
+                   resources=None, raw=False, from_sample=None, to_sample=None,
+                   max_changes=DEFAULT_MAX_CHANGES):
+    """对比资源样本，输出 episode 聚合变化、不可比断点与采集缺口。"""
+    selected = _change_resources(resources)
+    if type(max_changes) is not int or not 1 <= max_changes <= MAX_CHANGES_LIMIT:
+        raise StewardError(
+            f"changes --max-changes 必须是 1–{MAX_CHANGES_LIMIT} 的整数")
+    pair_mode = from_sample is not None or to_sample is not None
+    if pair_mode:
+        if from_sample is None or to_sample is None:
+            raise StewardError("changes 两点模式必须同时提供 --from-sample 和 --to-sample")
+        if minutes is not None or since is not None or until is not None \
+                or before is not None:
+            raise StewardError(
+                "changes 两点模式不能同时使用 --minutes/--since/--until/--before")
+        return _pair_changes_report(
+            store, from_sample, to_sample, process=process,
+            resources=selected, raw=raw, max_changes=max_changes)
+    if before is not None and (since is None or until is None):
+        raise StewardError(
+            "changes --before 必须同时提供上一页返回的 --since 和 --until，避免分页窗口移动")
+    return _range_changes_report(
+        store, minutes=minutes, since=since, until=until, limit=limit,
+        before=before, process=process, resources=selected, raw=raw,
+        max_changes=max_changes)
+
+
+def _compact_changes_details(result):
+    changed = False
+    gaps = result.get("gaps")
+    if isinstance(gaps, list):
+        compacted = []
+        for gap in gaps:
+            if not isinstance(gap, dict):
+                compacted.append(gap)
+                continue
+            item = _selected(gap, ("gap_id", "run_id", "start_at", "end_at",
+                                   "ongoing", "reason"))
+            if gap.get("detail") is not None:
+                item["detail"] = _context_summary(
+                    gap["detail"], byte_limit=384, text_limit=160, max_items=8)
+                item["detail_truncated"] = True
+            compacted.append(item)
+        result["gaps"] = compacted
+        changed = True
+    history = result.get("gap_history")
+    if isinstance(history, dict):
+        compact = _selected(history, (
+            "retention_hours", "retention_source", "complete_since", "count_limit",
+            "count_limited", "pruned_through", "declared_retention_hours",
+            "declared_count_limit", "hard_count_limit", "over_target",
+            "gap_history_degraded"))
+        if compact != history:
+            result["gap_history"] = compact
+            result["gap_history_trimmed"] = True
+            changed = True
+    boundary = result.get("boundary")
+    if isinstance(boundary, dict):
+        compact = _selected(boundary, (
+            "status", "page_oldest_sample_id", "page_oldest_observed_at",
+            "predecessor_sample_id", "predecessor_observed_at", "in_window",
+            "comparable", "reasons", "included_in_changes", "note"))
+        if compact != boundary:
+            result["boundary"] = compact
+            changed = True
+    return changed
+
+
+def _trim_change_traces(result, keep):
+    changed = False
+    for change in result.get("changes") or []:
+        if not isinstance(change, dict):
+            continue
+        points = change.get("samples")
+        if not isinstance(points, list):
+            continue
+        total = change.get("samples_total")
+        if total is None:
+            total = len(points) + int(change.get("samples_omitted") or 0)
+        if len(points) <= keep:
+            continue
+        if keep <= 0:
+            kept = []
+        else:
+            head = (keep + 1) // 2
+            tail = keep - head
+            kept = points[:head] + (points[-tail:] if tail else [])
+        change["samples"] = kept
+        change["samples_total"] = total
+        change["samples_omitted"] = total - len(kept)
+        changed = True
+    return changed
+
+
+def _trim_change_sequence(result, key, keep, omitted_key):
+    value = result.get(key)
+    if not isinstance(value, list) or len(value) <= keep:
+        return False
+    removed = len(value) - keep
+    result[key] = value[:keep]
+    result[omitted_key] = result.get(omitted_key, 0) + removed
+    return True
+
+
+def _changes_candidate(result, keep, base_omitted):
+    changes = result.get("changes") or []
+    candidate = dict(result)
+    candidate["changes"] = changes[:keep]
+    omitted = base_omitted + len(changes) - keep
+    candidate["changes_omitted"] = omitted
+    candidate["truncated"] = True
+    summary = dict(candidate.get("summary") or {})
+    summary["changes_returned"] = keep
+    summary["changes_omitted"] = omitted
+    candidate["summary"] = summary
+    if keep == 0 and changes:
+        candidate["pagination_blocked_by_output"] = True
+    return candidate
+
+
+def _minimal_changes_result(result):
+    minimal = {}
+    for key in ("status", "contract", "mode", "window", "pair", "baseline",
+                "target", "evaluated_samples", "evaluated_pairs", "next_before",
+                "changes_omitted", "pagination_blocked_by_output", "raw"):
+        if key in result:
+            minimal[key] = result[key]
+    minimal["changes"] = []
+    minimal["truncated"] = True
+    minimal["output_trimmed"] = True
+    summary = result.get("summary") or {}
+    minimal["summary"] = {
+        key: summary[key] for key in (
+            "evaluated_samples", "evaluated_pairs", "changes_evaluated",
+            "changes_omitted", "process_changes_not_loaded") if key in summary}
+    minimal["summary"]["changes_returned"] = 0
+    minimal["detail_scope"] = "输出预算内已裁剪到最小元数据；完整结果用 --output 导出"
+    return minimal
+
+
+def _changes_output_counts(result):
+    if not isinstance(result, dict):
+        return result
+    changes = result.get("changes")
+    if isinstance(changes, list):
+        summary = result.get("summary")
+        if isinstance(summary, dict):
+            summary = dict(summary)
+            summary["changes_returned"] = len(changes)
+            summary["changes_omitted"] = result.get("changes_omitted", 0)
+            result["summary"] = summary
+    return result
+
+
+def fit_changes_output(report, byte_limit):
+    if type(byte_limit) is not int or byte_limit <= 0:
+        raise StewardError("输出预算必须为正整数")
+    result = decode(encode(report))
+
+    def fits():
+        return len(encode(result)) <= byte_limit
+
+    if fits():
+        return _changes_output_counts(result)
+    result["output_trimmed"] = True
+    if isinstance(result.get("pairs"), list) and result["pairs"]:
+        result["raw_pairs_omitted"] = len(result.pop("pairs"))
+        result["output_raw_trimmed"] = True
+    if result.get("mode") == "pair" and "change" in result:
+        result.pop("change")
+        result["raw_change_omitted"] = True
+        result["output_raw_trimmed"] = True
+    if not fits() and _compact_changes_details(result):
+        result["output_detail_trimmed"] = True
+    for keep in (8, 4, 2, 0):
+        if fits():
+            break
+        if _trim_change_traces(result, keep):
+            result["output_trace_trimmed"] = True
+    if not fits() and _trim_change_sequence(
+            result, "discontinuities", 8, "discontinuities_omitted"):
+        result["output_discontinuity_trimmed"] = True
+    if not fits() and _trim_change_sequence(
+            result, "gaps", 8, "output_gap_omitted"):
+        result["output_gap_trimmed"] = True
+    if not fits():
+        changes = result.get("changes") or []
+        base_omitted = result.get("changes_omitted", 0)
+        original = len(changes)
+        lower, upper, best = 0, original - 1, None
+        while lower <= upper:
+            middle = (lower + upper) // 2
+            candidate = _changes_candidate(result, middle, base_omitted)
+            if len(encode(candidate)) <= byte_limit:
+                best = candidate
+                lower = middle + 1
+            else:
+                upper = middle - 1
+        if best is not None:
+            result = best
+        else:
+            result = _changes_candidate(result, 0, base_omitted)
+            if original:
+                result["pagination_blocked_by_output"] = True
+            if not fits():
+                result = _minimal_changes_result(result)
+                if not fits():
+                    result = {"status": "output_limited", "output_limited": True,
+                              "message": "输出预算不足，请用 --output 导出或缩小查询范围"}
+                if not fits():
+                    result = {"output_limited": True}
+    return _changes_output_counts(result)
+
+
 def _compact_output_details(result):
     """输出预算不足时先压缩非样本明细，保留运行状态、时间和 gap 原因。"""
     changed = False

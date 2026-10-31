@@ -10,6 +10,8 @@ CPU 结合持续时间、任务进展和前台体验判断。`ps` 百分比采�
 
 内存结合实际压力和同一进程的多次样本判断。常驻历史用 `samples` 读取主机级样本（内存计数器、swap、网络接口计数、磁盘速率）与进程 RSS/CPU 序列，采集口径与分页见[查询与输出](../patrol.md#查询与输出)；`patrol` 仍按单轮保存 GPU、电源等额外观测。相邻样本是否可比先看 `continuity.reasons`：`gap_history_incomplete` 表示查询区间早于缺口记录的完整起点，不能用“没有缺口记录”推断连续。agent 根据任务、缓存行为、持续时间和内存口径分析趋势，决定是否继续调查。需要跨轮跟进时按 [巡检指导](../patrol.md#待核验事项与记录收尾)登记事项。
 
+需要跨样本看“变化”而不是逐点读数时用 `changes`（参数、分页与退出码见[查询与输出](../patrol.md#查询与输出)）。区间模式把同一 `(resource,path)` 的连续可比变化合并成一条 episode，值稳定、方向反转或累计计数器回退时断开；跨 run、重启、时钟跳变和采集缺口的相邻对不合并，只记 `discontinuities`，采集缺口仍在 `gaps` 中单独列出。累计计数器（Linux cpu jiffies、磁盘/网卡字节、进程 `cpu_ticks`）看 `delta` 与 `pairs`；macOS 的 CPU 占比和磁盘速率是瞬时值，只能按 `value_change` 记录时点差，不能当作区间速率。进程差分需显式 `--process`，否则 `summary.process_changes_not_loaded=true`，不能把“没有进程变化”当作进程稳定。两点模式 `--from-sample/--to-sample` 直接比较两个编号；`first/last_sample_id` 与 `baseline_sample_id` 都能回到 `samples` 或数据库中的原始样本核对。
+
 ## 保留窗口与历史配置
 
 资源库的运行记录与缺口保留设置来自 host.json 顶层 `history`，默认各 256 条、168 小时：
