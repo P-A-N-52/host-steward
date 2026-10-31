@@ -113,8 +113,9 @@ class ResourceQueryTests(unittest.TestCase):
             self.append(index)
         report = history_report(self.store, until=BASE + 600, limit=100)
         original = copy.deepcopy(report)
-        bounded = fit_history_output(report, 5000)
-        self.assertLessEqual(len(encode(bounded)), 5000)
+        # 固定契约元数据约 4.3KB；6000 字节预算仍须保留至少一个样本。
+        bounded = fit_history_output(report, 6000)
+        self.assertLessEqual(len(encode(bounded)), 6000)
         self.assertTrue(bounded["output_trimmed"])
         self.assertGreater(bounded["output_sample_omitted"], 0)
         self.assertTrue(bounded["samples"])
@@ -263,7 +264,7 @@ class ResourceQueryTests(unittest.TestCase):
         self.assertLessEqual(len(encode(detail)), 4096)
         self.assertIn("省略", detail["source_errors"][0]["traceback"])
         self.assertEqual(len(report["samples"]), 2)
-        bounded = fit_history_output(report, len(encode(report)) // 2)
+        bounded = fit_history_output(report, len(encode(report)) * 2 // 3)
         self.assertNotEqual(bounded.get("status"), "output_limited")
         self.assertFalse(bounded.get("output_limited"))
         self.assertTrue(bounded["samples"])
@@ -323,7 +324,8 @@ class ResourceQueryTests(unittest.TestCase):
         report = history_report(self.store, until=BASE + 75, before=6, limit=5)
         self.assertEqual(report["window"]["before"], 6)
         self.assertEqual(len(report["samples"]), 5)
-        bounded = fit_history_output(report, 4000)
+        # 4500 字节可容纳空页固定元数据，但容不下一个完整样本。
+        bounded = fit_history_output(report, 4500)
         self.assertNotEqual(bounded.get("status"), "output_limited")
         self.assertEqual(bounded["samples"], [])
         self.assertIsNone(bounded["next_before"])
@@ -357,6 +359,139 @@ class ResourceQueryTests(unittest.TestCase):
         self.assertIsNone(report["summary"]["cpu_busy_percent"])
         self.assertEqual(report["summary"]["available_memory_bytes"]["latest"], 9900)
         self.assertEqual(report["summary"]["swap_used_bytes"]["latest"], 20)
+
+    def test_contract_and_retention_history_survive_output_trimming(self):
+        effective = {"runs": {"records": 8, "retention_hours": 100},
+                     "gaps": {"records": 9, "retention_hours": 50}}
+        declared = {"runs": {"records": 12, "retention_hours": 200},
+                    "gaps": {"records": 20, "retention_hours": 60}}
+        self.store.history = declared
+        self.history.start_run("run-h", {"version": 2, "sampling": self.sampling,
+                                         "history": effective},
+                               {"policy_version": 2, "policy_digest": "c" * 64},
+                               started_at=BASE)
+        for index in range(41):
+            self.append(index, run_id="run-h")
+        report = history_report(self.store, until=BASE + 600, limit=100)
+        contract = {"name": "host-steward.resource_history", "version": 1}
+        self.assertEqual(report["contract"], contract)
+        retention = report["retention"]["history"]
+        self.assertEqual(retention["retention_source"], "latest_run_policy")
+        self.assertEqual(retention["effective"], effective)
+        self.assertEqual(retention["declared"], declared)
+        self.assertFalse(retention["over_target"]["runs"])
+        self.assertFalse(retention["over_target"]["gaps"])
+        gap_history = report["gap_history"]
+        self.assertEqual(gap_history["retention_source"], "latest_run_policy")
+        self.assertEqual(gap_history["retention_hours"], 50)
+        self.assertEqual(gap_history["count_limit"], 9)
+        self.assertEqual(gap_history["declared_retention_hours"], 60)
+        self.assertEqual(gap_history["declared_count_limit"], 20)
+        self.assertIsNone(gap_history["pruned_through"])
+        self.assertFalse(gap_history["over_target"])
+
+        for raw in (False, True):
+            with self.subTest(raw=raw):
+                trimmed = fit_history_output(
+                    history_report(self.store, until=BASE + 600, limit=100, raw=raw), 6000)
+                self.assertLessEqual(len(encode(trimmed)), 6000)
+                self.assertEqual(trimmed["contract"], contract)
+                history = trimmed["retention"]["history"]
+                self.assertEqual(history["retention_source"], "latest_run_policy")
+                self.assertEqual(history["effective"], effective)
+                self.assertEqual(history["declared"], declared)
+                self.assertFalse(history["over_target"]["runs"])
+                self.assertFalse(history["over_target"]["gaps"])
+                self.assertIn("counts", history)
+                self.assertIn("hard_limits", history)
+                gap = trimmed["gap_history"]
+                self.assertEqual(gap["retention_source"], "latest_run_policy")
+                self.assertIsNone(gap["pruned_through"])
+                self.assertEqual(gap["declared_retention_hours"], 60)
+                self.assertEqual(gap["declared_count_limit"], 20)
+                self.assertIn("hard_count_limit", gap)
+                self.assertIn("gap_history_degraded", gap)
+                self.assertFalse(gap["over_target"])
+
+    def test_memory_summary_projects_non_byte_units_and_platform_gaps(self):
+        counters = {"MemTotal": 20000, "MemFree": 1000, "Cached": 500, "AnonPages": 300,
+                    "HugePages_Total": 4, "HugePages_Free": 2, "HugePages_Rsvd": 1,
+                    "HugePages_Surp": 0, "Odd": 7}
+        units = {"MemTotal": "bytes", "MemFree": "bytes", "Cached": "bytes",
+                 "AnonPages": "bytes", "HugePages_Total": "count",
+                 "HugePages_Free": "count", "HugePages_Rsvd": "count",
+                 "HugePages_Surp": "count", "Odd": "MB"}
+        source_units = {"MemTotal": "kB", "MemFree": "kB", "Cached": "kB",
+                        "AnonPages": "kB", "HugePages_Total": None,
+                        "HugePages_Free": None, "HugePages_Rsvd": None,
+                        "HugePages_Surp": None, "Odd": "MB"}
+        reason = "旧内核 /proc/meminfo 未提供 MemAvailable；不伪造推导值"
+        self.append(0, host={"memory": {
+            "available": True, "reason": None, "source": "/proc/meminfo",
+            "total_bytes": 20000, "available_bytes": None, "available_reason": reason,
+            "counters": counters, "units": units, "source_units": source_units,
+            "platform_gaps": [{"field": "MemAvailable", "reason": reason}],
+            "swap": {"available": True, "total_bytes": 0, "free_bytes": 0, "used_bytes": 0}}})
+        memory = history_report(self.store, until=BASE + 15)["samples"][0]["host"]["memory"]
+        self.assertIn("Cached", memory["components"])
+        self.assertEqual(memory["component_units"],
+                         "components 均为已换算的 bytes 口径；其余 counters 的单位见 non_byte_units，"
+                         "HugePages_* 为无单位计数")
+        self.assertEqual(memory["non_byte_units"]["HugePages_Total"],
+                         {"units": "count", "source_units": None})
+        self.assertEqual(memory["non_byte_units"]["Odd"],
+                         {"units": "MB", "source_units": "MB"})
+        self.assertNotIn("Cached", memory["non_byte_units"])
+        self.assertEqual(memory["non_byte_counters"]["HugePages_Total"], 4)
+        self.assertEqual(memory["non_byte_counters"]["Odd"], 7)
+        self.assertEqual(memory["available_reason"], reason)
+        self.assertEqual(memory["platform_gaps"], [{"field": "MemAvailable",
+                                                    "reason": reason}])
+        self.assertNotIn("non_byte_units_omitted", memory)
+        self.assertNotIn("platform_gaps_omitted", memory)
+
+    def test_memory_summary_stays_quiet_without_linux_unit_fields(self):
+        self.append(0, host={"memory": {
+            "available": True, "reason": None, "total_bytes": 20000, "page_size": 4096,
+            "counters": {"Pages free": 10, "Pages active": 20},
+            "swap": {"available": True, "used_bytes": 20}}})
+        memory = history_report(self.store, until=BASE + 15)["samples"][0]["host"]["memory"]
+        self.assertEqual(memory["component_units"], "vm_stat 保留页数；不混合相加")
+        for key in ("non_byte_units", "non_byte_counters", "non_byte_units_omitted",
+                    "non_byte_counters_omitted", "available_reason",
+                    "platform_gaps", "platform_gaps_omitted"):
+            self.assertNotIn(key, memory)
+
+    def test_memory_projection_bounds_items_with_omitted_markers(self):
+        keys = [f"Counter{index:02d}" for index in range(18)]
+        counters = {key: index for index, key in enumerate(keys)}
+        units = {key: "MB" for key in keys}
+        reason = "R" * 600
+        gaps = [{"field": f"field-{index}", "reason": reason} for index in range(9)]
+        self.append(0, host={"memory": {
+            "available": True, "total_bytes": 20000, "available_bytes": 1000,
+            "counters": counters, "units": units,
+            "source_units": dict(units), "platform_gaps": gaps}})
+        memory = history_report(self.store, until=BASE + 15)["samples"][0]["host"]["memory"]
+        self.assertEqual(len(memory["non_byte_units"]), 16)
+        self.assertEqual(memory["non_byte_units_omitted"], 2)
+        self.assertEqual(len(memory["non_byte_counters"]), 16)
+        self.assertEqual(memory["non_byte_counters_omitted"], 2)
+        self.assertEqual(len(memory["platform_gaps"]), 8)
+        self.assertEqual(memory["platform_gaps_omitted"], 1)
+        self.assertIn("省略", memory["platform_gaps"][0]["reason"])
+        self.assertLess(len(memory["platform_gaps"][0]["reason"].encode("utf-8")), 600)
+
+    def test_history_limit_defaults_and_maximum_are_explicit(self):
+        self.append(0)
+        self.assertEqual(history_report(self.store, until=BASE)["page"]["limit"], 41)
+        self.assertEqual(
+            history_report(self.store, until=BASE, limit=200)["page"]["limit"], 200)
+        for limit in (0, -1, 201, True, "10", 2.5):
+            with self.subTest(limit=limit), self.assertRaises(StewardError) as caught:
+                history_report(self.store, until=BASE, limit=limit)
+            self.assertIn("200", str(caught.exception))
+            self.assertIn("41", str(caught.exception))
 
 
 if __name__ == "__main__":

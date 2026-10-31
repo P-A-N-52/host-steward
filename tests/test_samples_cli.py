@@ -51,10 +51,18 @@ class SamplesCliTests(unittest.TestCase):
         self.assertEqual(samples.returncode, 0, samples.stderr)
         report = json.loads(samples.stdout)
         self.assertEqual(report["status"], "resource_history")
+        self.assertEqual(report["contract"],
+                         {"name": "host-steward.resource_history", "version": 1})
+        self.assertEqual(report["page"]["limit"], 41)
         self.assertEqual(len(report["samples"]), 1)
         self.assertEqual(report["policy_source"], "current_host_json")
         self.assertTrue(report["current_policy_valid"])
         self.assertIn("latest_processes", report)
+        self.assertEqual(report["retention"]["history"]["retention_source"],
+                         "latest_run_policy")
+        self.assertIn("declared", report["retention"]["history"])
+        self.assertIn("pruned_through", report["gap_history"])
+        self.assertIn("declared_retention_hours", report["gap_history"])
         status = self.cli("status", "--state", str(self.state))
         self.assertEqual(status.returncode, 0, status.stderr)
         summary = json.loads(status.stdout)
@@ -103,6 +111,18 @@ class SamplesCliTests(unittest.TestCase):
         recovered = self.collect_once()
         self.assertEqual(recovered["status"], "ok")
 
+    def test_samples_limit_is_explicit_and_rejects_values_above_maximum(self):
+        self.collect_once()
+        accepted = self.cli("samples", "--state", str(self.state), "--limit", "200")
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(json.loads(accepted.stdout)["page"]["limit"], 200)
+        for limit in ("0", "-1", "201"):
+            with self.subTest(limit=limit):
+                denied = self.cli("samples", "--state", str(self.state), "--limit", limit)
+                self.assertNotEqual(denied.returncode, 0)
+                self.assertIn("200", denied.stderr)
+                self.assertIn("41", denied.stderr)
+
     def test_samples_paging_requires_fixed_window_and_export_is_exclusive(self):
         self.collect_once()
         rejected = self.cli("samples", "--state", str(self.state), "--before", "1")
@@ -115,6 +135,8 @@ class SamplesCliTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "resource_history_exported")
         payload = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(payload["status"], "resource_history")
+        self.assertEqual(payload["contract"],
+                         {"name": "host-steward.resource_history", "version": 1})
         self.assertEqual(payload["raw_count"], 1)
         again = self.cli("samples", "--state", str(self.state), "--output", str(output))
         self.assertNotEqual(again.returncode, 0)
