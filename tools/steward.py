@@ -22,6 +22,7 @@ from state import PolicyChangedError, Store, StewardError, decode, encode, read_
 from state_schema import read_current, read_operations
 
 PROJECT = Path(__file__).resolve().parent.parent
+TOOL_VERSION = "0.2.0"
 
 
 def scan(progress, limits, roots, exclude_names=(), state_path=None, recheck=None):
@@ -111,7 +112,7 @@ def initialize(directory, roots, purpose, max_depth=32):
         payloads = {"steward.sqlite3": store.empty_database_bytes()}
         for file in sorted((PROJECT / "guidance").rglob("*.md")):
             payloads["guidance/" + str(file.relative_to(PROJECT / "guidance"))] = read_regular_bytes(file, policy["limits"]["file_bytes"])
-        payloads["adaptation.json"] = encode({"source_version": "0.2.0", "removed_sections": [],
+        payloads["adaptation.json"] = encode({"source_version": TOOL_VERSION, "removed_sections": [],
                                               "reason": "保留通用说明；具体能力和权限以观测结果、本机约定为准"})
         payloads["host.json"] = encode(policy)
         if len(payloads["host.json"]) > min(32768, policy["limits"]["file_bytes"]):
@@ -570,7 +571,8 @@ def patrol(store, policy, discard_scan_progress=False, discard_event_recheck=Fal
                                             complete=snapshot["complete"]))
         state = dict(previous)
         state.pop("pending_overflow", None)
-        state.update({"version": 1, "last_run": {"observed_at": now, "elapsed_seconds": round(time.monotonic() - started, 3),
+        state.update({"version": 1, "last_run": {"observed_at": now, "tool_version": TOOL_VERSION,
+                      "elapsed_seconds": round(time.monotonic() - started, 3),
                       "coverage_complete": set(snapshots) == set(roots) and all(snapshot["complete"] for snapshot in snapshots.values()),
                       "policy_evidence": evidence, "state_bytes_before": store.usage()},
                       "host": host, "events": events, "baselines": baselines, "directory_index": directory_index,
@@ -594,7 +596,8 @@ def patrol(store, policy, discard_scan_progress=False, discard_event_recheck=Fal
             host_summary["network"] = dict(
                 network, interfaces=dict(network["interfaces"], items=ranked[:6], trimmed_for_report=True))
         overview = sorted(directory_index, key=lambda row: (-row["bytes"], row["path"]))[:12]
-        report = {"status": "observed", "state": str(store.path), "last_run": state["last_run"],
+        report = {"status": "observed", "tool_version": TOOL_VERSION, "state": str(store.path),
+                  "last_run": state["last_run"],
                   "policy_version": policy["version"], "policy": policy, "policy_evidence": evidence,
                   "roots": policy["roots"],
                   "host": host_summary,
@@ -716,6 +719,8 @@ def status_report(store, policy, *, limit=20, offset=0, path=None):
                           and last_evidence.get("policy_source_digest") == store.policy_evidence.get("policy_source_digest"))
     return {
         "storage": storage, "last_run": last_run,
+        "tool_version": TOOL_VERSION,
+        "last_run_tool_version": last_run.get("tool_version") if isinstance(last_run, dict) else None,
         "policy_version": policy["version"], "policy": policy, "policy_evidence": store.policy_evidence,
         "coverage_policy_evidence": last_evidence, "policy_matches_last_run": policy_matches,
         "policy_source_matches_last_run": source_matches,
@@ -740,7 +745,7 @@ def status_report(store, policy, *, limit=20, offset=0, path=None):
 def main():
     if sys.platform not in ["darwin", "linux"]:
         raise StewardError("当前工具仅支持 macOS 和 Linux")
-    parser = argparse.ArgumentParser(description="Host Steward 0.2 — 有界巡检、本机档案与只读调查")
+    parser = argparse.ArgumentParser(description=f"Host Steward {TOOL_VERSION} — 有界巡检、本机档案与只读调查")
     commands = parser.add_subparsers(dest="action", required=True)
     init = commands.add_parser("init", help="建立本机约定；默认只读维护范围")
     init.add_argument("--state", required=True)
@@ -811,7 +816,8 @@ def main():
         store, policy = initialize(args.state, args.root, args.purpose, args.max_depth)
         resolution = [{"input": value, "path": root["path"]}
                       for value, root in zip(args.root, policy["roots"])]
-        emit({"status": "initialized", "state": str(store.path), "roots": policy["roots"],
+        emit({"status": "initialized", "tool_version": TOOL_VERSION, "state": str(store.path),
+              "roots": policy["roots"],
               "root_resolution": resolution, "max_depth": args.max_depth,
               "policy_version": policy["version"], "policy": policy,
               "policy_evidence": store.policy_evidence,

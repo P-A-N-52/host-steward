@@ -26,6 +26,10 @@ def timestamp_seconds(value):
     return number(value) and -10**12 <= value <= 10**12
 
 
+def tool_version(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value) is not None
+
+
 def object_field(data, key, name):
     if key not in data:
         return {}
@@ -282,7 +286,11 @@ def read_current(store, fields=None):
         return data
     require(integer(data.get("version")) and data["version"] == 1, name, "version 必须是整数 1")
     if "last_run" in data:
-        require(data["last_run"] is None or isinstance(data["last_run"], dict), name, "last_run 必须是对象或 null")
+        last_run = data["last_run"]
+        require(last_run is None or isinstance(last_run, dict), name, "last_run 必须是对象或 null")
+        if isinstance(last_run, dict) and "tool_version" in last_run:
+            require(tool_version(last_run["tool_version"]), name,
+                    "last_run.tool_version 必须是三段式版本号（例如 0.2.0）；旧状态缺少该字段仍可读取")
     object_field(data, "host", name)
     events = object_field(data, "events", name)
     validate_events(events, name)
