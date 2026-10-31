@@ -21,6 +21,7 @@ from collector import (
     CollectorError,
     collector_lease,
 )
+import history_config
 from policy import make_policy_evidence, policy_digest
 from sample_store import SampleStore
 from state import Store
@@ -44,9 +45,15 @@ def sampling(*, interval=1, cycle=1, process_interval=3, processes=2,
     }
 
 
+def history_settings(*, runs_records=256, runs_hours=168,
+                     gaps_records=256, gaps_hours=168):
+    return {"runs": {"records": runs_records, "retention_hours": runs_hours},
+            "gaps": {"records": gaps_records, "retention_hours": gaps_hours}}
+
+
 def make_policy(*, purpose="collector 测试", config_sampling=None,
-                roots=None, limits=None):
-    return {
+                roots=None, limits=None, history=None):
+    policy = {
         "version": 2,
         "purpose": purpose,
         "roots": roots or ["/tmp"],
@@ -54,6 +61,9 @@ def make_policy(*, purpose="collector 测试", config_sampling=None,
         "residents": [],
         "limits": limits or dict(LIMITS),
     }
+    if history is not None:
+        policy["history"] = history
+    return policy
 
 
 class Clock:
@@ -545,13 +555,21 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(self.store.policy_evidence["policy_digest"],
                          policy_digest(policy))
         self.assertEqual(summary["policy_digest"], policy_digest(policy))
+        self.assertEqual(self.store.history, history_config.DEFAULT_HISTORY)
+        retention = collector.samples.status()["retention"]["history"]
+        self.assertEqual(retention["retention_source"], "defaults")
 
     def test_hot_switch_applies_new_limits_and_evidence(self):
-        policy_a = make_policy(purpose="limits-A", limits=dict(LIMITS))
+        history_a = history_settings(runs_records=16, gaps_records=12)
+        history_b = history_settings(runs_records=12, gaps_records=20,
+                                     gaps_hours=48)
+        policy_a = make_policy(purpose="limits-A", limits=dict(LIMITS),
+                               history=history_a)
         policy_b = make_policy(
             purpose="limits-B",
             limits={"command_bytes": 262144, "file_bytes": 32768,
-                    "total_bytes": 2 * 1024 * 1024})
+                    "total_bytes": 2 * 1024 * 1024},
+            history=history_b)
         reader = ScriptedReader([policy_a, policy_a, policy_b])
         sampler = FakeSampler(self.clock)
         collector = make_collector(
@@ -564,19 +582,29 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(self.store.policy_evidence["policy_digest"],
                          policy_digest(policy_b))
         self.assertEqual(summary["policy_digest"], policy_digest(policy_b))
+        self.assertEqual(self.store.history, history_b)
         page = collector.samples.query(None, None, limit=10)
         self.assertEqual(len(page["samples"]), 2)
         by_run = {sample["run_id"]: sample for sample in page["samples"]}
         self.assertEqual(by_run["run-2"]["run"]["policy"]["purpose"], "limits-B")
         self.assertEqual(by_run["run-2"]["run"]["evidence"]["policy_digest"],
                          policy_digest(policy_b))
+        self.assertEqual(by_run["run-2"]["run"]["policy"]["history"], history_b)
+        retention = page["retention"]["history"]
+        self.assertEqual(retention["retention_source"], "latest_run_policy")
+        self.assertEqual(retention["effective"]["runs"]["records"], 12)
+        self.assertEqual(retention["declared"], history_b)
 
     def test_hot_switch_budget_rejection_restores_old_limits_and_evidence(self):
-        policy_a = make_policy(purpose="reject-A", limits=dict(LIMITS))
+        history_a = history_settings(runs_records=16, gaps_records=12)
+        history_b = history_settings(runs_records=12, gaps_records=20)
+        policy_a = make_policy(purpose="reject-A", limits=dict(LIMITS),
+                               history=history_a)
         policy_b = make_policy(
             purpose="reject-B",
             limits={"command_bytes": 262144, "file_bytes": 32768,
-                    "total_bytes": 1})
+                    "total_bytes": 1},
+            history=history_b)
         reader = ScriptedReader([policy_a, policy_a, policy_b])
         sampler = FakeSampler(self.clock)
         collector = make_collector(
@@ -589,6 +617,8 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(self.store.limits, policy_a["limits"])
         self.assertEqual(self.store.policy_evidence["policy_digest"],
                          policy_digest(policy_a))
+        self.assertEqual(self.store.history, history_a)
+        self.assertEqual(collector._policy_state.history, history_a)
         self.assertEqual(collector._policy_state.digest, policy_digest(policy_a))
         detail = state_detail(self.store)
         self.assertEqual(detail["phase"], "config_switch_failed")
@@ -1038,6 +1068,122 @@ class CollectorTests(unittest.TestCase):
         by_run = {sample["run_id"]: sample for sample in page["samples"]}
         self.assertEqual(by_run["run-1"]["boot"]["boot_id"], "boot-a")
         self.assertEqual(by_run["run-2"]["boot"]["boot_id"], "boot-b")
+
+    def test_history_only_change_switches_run_and_applies_new_retention(self):
+        history_a = history_settings(runs_records=16, gaps_records=12)
+        history_b = history_settings(runs_records=12, gaps_records=20,
+                                     gaps_hours=48)
+        policy_a = make_policy(purpose="history-A", history=history_a)
+        policy_b = make_policy(purpose="history-A", history=history_b)
+        self.assertNotEqual(policy_digest(policy_a), policy_digest(policy_b))
+        reader = ScriptedReader([policy_a, policy_a, policy_b])
+        sampler = FakeSampler(self.clock)
+        collector = make_collector(
+            self.store, self.clock, sampler, reader=reader,
+            wait=advancing_wait(self.clock), stop_lock_timeout=0.0)
+        sampler.on_call = stop_on_sampler_call({"collector": collector}, 2)
+        summary = collector.run()
+
+        self.assertEqual(summary["run_changes"], 1)
+        self.assertEqual(summary["last_config_event"]["kind"], "config_changed")
+        self.assertEqual(self.store.history, history_b)
+        page = collector.samples.query(None, None, limit=10)
+        self.assertEqual(len(page["samples"]), 2)
+        newest = page["samples"][0]
+        self.assertEqual(newest["run"]["run_id"], "run-2")
+        self.assertEqual(newest["run"]["policy"]["history"], history_b)
+        retention = page["retention"]["history"]
+        self.assertEqual(retention["retention_source"], "latest_run_policy")
+        self.assertEqual(retention["effective"]["runs"]["records"], 12)
+        self.assertEqual(retention["effective"]["gaps"]["retention_hours"], 48)
+        self.assertEqual(retention["declared"], history_b)
+
+    def test_history_switch_prunes_runs_at_new_run_boundary(self):
+        samples = SampleStore(self.store)
+        seed_policy = make_policy(purpose="seed")
+        evidence = make_policy_evidence(seed_policy)
+        for index in range(12):
+            run_id = f"seed-{index:02d}"
+            started = BASE_WALL - 1000 + index * 10
+            samples.start_run(run_id, seed_policy, evidence, started_at=started)
+            samples.finish_run(run_id, stopped_at=started + 1)
+        self.assertEqual(len(run_rows(self.store)), 12)
+
+        history_a = history_settings(runs_records=16)
+        history_b = history_settings(runs_records=8)
+        policy_a = make_policy(purpose="wide", history=history_a)
+        policy_b = make_policy(purpose="narrow", history=history_b)
+        reader = ScriptedReader([policy_a, policy_a, policy_b])
+        sampler = FakeSampler(self.clock)
+        collector = make_collector(
+            self.store, self.clock, sampler, reader=reader,
+            wait=advancing_wait(self.clock), stop_lock_timeout=0.0)
+        sampler.on_call = stop_on_sampler_call({"collector": collector}, 2)
+        summary = collector.run()
+
+        self.assertEqual(summary["run_changes"], 1)
+        self.assertEqual(self.store.history, history_b)
+        # 新 run 的 start_run 使用新 history 触发裁剪，目标 8 立即生效。
+        self.assertEqual(len(run_rows(self.store)), 8)
+        self.assertEqual(
+            collector.samples.status()["retention"]["history"]["effective"]["runs"]
+            ["records"], 8)
+
+    def test_stopped_config_change_applies_on_next_batch(self):
+        history_a = history_settings(runs_records=8, gaps_records=8)
+        history_b = history_settings(runs_records=16, gaps_records=16,
+                                     gaps_hours=48)
+        policy_a = make_policy(purpose="stopped-A", history=history_a)
+        collector = make_collector(
+            self.store, self.clock, FakeSampler(self.clock), policy=policy_a)
+        first = collector.run(once=True)
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(self.store.history, history_a)
+
+        self.clock.advance(5)
+        policy_b = make_policy(purpose="stopped-B", history=history_b)
+        reader = ScriptedReader([policy_b])
+        second = make_collector(
+            self.store, self.clock, FakeSampler(self.clock), reader=reader,
+            run_id_counter={"value": 1})
+        summary = second.run(once=True)
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(self.store.history, history_b)
+        page = second.samples.query(None, None, limit=10)
+        self.assertEqual(page["samples"][0]["run"]["policy"]["history"], history_b)
+        self.assertEqual(page["retention"]["history"]["effective"]["gaps"]
+                         ["retention_hours"], 48)
+
+    def test_invalid_config_keeps_previous_history_for_readonly_fallback(self):
+        history_a = history_settings(runs_records=8, gaps_records=8)
+        policy_a = make_policy(purpose="invalid-history", history=history_a)
+        invalid = StewardError("invalid host.json: history")
+        reader = ScriptedReader([policy_a, invalid, policy_a])
+        sampler = FakeSampler(self.clock)
+        collector_ref = {"collector": None}
+        wait_calls = {"count": 0}
+
+        def wait(timeout):
+            self.clock.advance(timeout)
+            wait_calls["count"] += 1
+            if wait_calls["count"] >= 2:
+                collector_ref["collector"].request_stop()
+            return False
+
+        collector = make_collector(
+            self.store, self.clock, sampler, reader=reader, wait=wait,
+            stop_lock_timeout=0.0)
+        collector_ref["collector"] = collector
+        summary = collector.run()
+
+        self.assertEqual(summary["config_errors"], 1)
+        self.assertEqual(self.store.history, history_a)
+        self.assertEqual(collector._policy_state.history, history_a)
+        page = collector.samples.query(None, None)
+        self.assertEqual(len(page["samples"]), 1)
+        self.assertTrue(any(gap["reason"] == "config_error"
+                            for gap in page["gaps"]))
+        self.assertEqual(collector.samples.status()["status"], "stopped")
 
     @unittest.skipUnless(platform.system() == "Darwin", "仅在本机 macOS 跑真实命令")
     def test_macos_collector_once_reads_real_host_json(self):

@@ -10,6 +10,7 @@ from unittest.mock import patch
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "tools"))
 
+import history_config
 import sample_store
 from database import Database, DatabaseError
 from sample_store import SampleStore
@@ -84,6 +85,20 @@ class SampleStoreTests(unittest.TestCase):
                 "process_interval_seconds": max(60, interval_seconds),
                 "processes": processes, "records": records,
                 "retention_hours": retention_hours}
+
+    def history_settings(self, *, runs_records=256, runs_hours=168,
+                         gaps_records=256, gaps_hours=168):
+        return {"runs": {"records": runs_records, "retention_hours": runs_hours},
+                "gaps": {"records": gaps_records, "retention_hours": gaps_hours}}
+
+    def use_history(self, history, *, run_id="history-run", started_at=None):
+        """同时更新声明值和最新 run policy，使 effective/declared 一致。"""
+        self.store.history = history
+        self.samples.start_run(
+            run_id, dict(self.policy, history=history), self.evidence,
+            started_at=BASE if started_at is None else started_at,
+            boot=self.boot, pid=1234)
+        return run_id
 
     def append(self, offset, *, run_id=None, host=None, sources=None,
                processes=None, sampling=None):
@@ -235,12 +250,22 @@ class SampleStoreTests(unittest.TestCase):
             connection.close()
         self.assertIn("process_samples_identity_idx", indexes)
         gap_history = first["gap_history"]
-        self.assertEqual(gap_history["retention_hours"],
-                         sample_store.GAP_RETENTION_HOURS)
+        defaults = history_config.DEFAULT_HISTORY["gaps"]
+        self.assertEqual(gap_history["retention_hours"], defaults["retention_hours"])
+        self.assertEqual(gap_history["count_limit"], defaults["records"])
+        self.assertEqual(gap_history["retention_source"], "defaults")
+        self.assertEqual(gap_history["declared_retention_hours"],
+                         defaults["retention_hours"])
+        self.assertEqual(gap_history["declared_count_limit"], defaults["records"])
+        self.assertEqual(gap_history["hard_count_limit"],
+                         history_config.GAP_ABSOLUTE_LIMIT)
+        self.assertIsNone(gap_history["pruned_through"])
+        self.assertIsNone(gap_history["gap_history_degraded"])
         self.assertFalse(gap_history["count_limited"])
+        self.assertFalse(gap_history["over_target"])
         self.assertAlmostEqual(
             gap_history["complete_since"],
-            BASE + 3 - sample_store.GAP_RETENTION_HOURS * 3600)
+            BASE + 3 - defaults["retention_hours"] * 3600)
 
         with self.assertRaises(DatabaseError):
             self.samples.query(BASE, BASE, limit=0)
@@ -250,15 +275,19 @@ class SampleStoreTests(unittest.TestCase):
             self.samples.query(BASE + 1, BASE)
 
     def test_gap_history_marks_count_pruning_boundary(self):
-        with patch.object(sample_store, "GAP_LIMIT", 2), \
-                patch.object(sample_store, "GAP_RETENTION_HOURS", 1):
-            for index in range(3):
-                self.samples.record_gap(BASE + 100 + index,
-                                        BASE + 101 + index, f"g{index}")
-            page = self.samples.query(None, BASE + 200)
+        self.use_history(self.history_settings(gaps_records=8, gaps_hours=1000))
+        for index in range(9):
+            self.samples.record_gap(BASE + 100 + index,
+                                    BASE + 101 + index, f"g{index}")
+        self.assertEqual(self.count("collector_gaps"), 8)
+        page = self.samples.query(None, BASE + 200)
         history = page["gap_history"]
         self.assertTrue(history["count_limited"])
-        self.assertGreaterEqual(history["complete_since"], BASE + 100)
+        self.assertTrue(history["over_target"] is False)
+        self.assertAlmostEqual(history["pruned_through"], BASE + 101)
+        self.assertGreaterEqual(history["complete_since"], BASE + 101)
+        self.assertEqual(history["retention_source"], "latest_run_policy")
+        self.assertEqual(history["count_limit"], 8)
 
     def test_latest_process_snapshot_is_not_empty_when_not_sampled(self):
         first = self.append(0, processes=[{"identity": "p1", "rss_bytes": 10}])
@@ -323,74 +352,69 @@ class SampleStoreTests(unittest.TestCase):
         self.assertEqual(self.count("process_samples"), 1)
 
     def test_runs_are_bounded_but_sample_and_gap_evidence_is_retained(self):
-        with patch.object(sample_store, "RUN_LIMIT", 4), \
-                patch.object(sample_store, "RUN_RETENTION_HOURS", 1):
-            for index in range(10):
-                run_id = f"plain-{index:02d}"
-                self.samples.start_run(run_id, self.policy, {"index": index},
-                                       started_at=BASE + index * 10)
-                self.samples.finish_run(run_id, stopped_at=BASE + index * 10 + 1)
-            self.assertLessEqual(self.count("collector_runs"), 4)
+        self.store.history = self.history_settings(
+            runs_records=8, runs_hours=1, gaps_records=10, gaps_hours=1)
+        for index in range(12):
+            run_id = f"plain-{index:02d}"
+            self.samples.start_run(run_id, self.policy, {"index": index},
+                                   started_at=BASE + index * 10)
+            self.samples.finish_run(run_id, stopped_at=BASE + index * 10 + 1)
+        self.assertLessEqual(self.count("collector_runs"), 8)
 
-            old_run = "run-with-sample"
-            self.samples.start_run(old_run, self.policy, {"old": True},
-                                   started_at=BASE + 100)
-            self.append(100, run_id=old_run,
-                        sampling=self.sampling(records=5, retention_hours=100))
-            self.samples.finish_run(old_run, stopped_at=BASE + 101)
-            for index in range(6):
-                run_id = f"new-{index:02d}"
-                self.samples.start_run(run_id, self.policy, {"index": index},
-                                       started_at=BASE + 200 + index * 10)
-                self.samples.finish_run(run_id, stopped_at=BASE + 201 + index * 10)
-            self.assertEqual(self.count("collector_runs", "run_id=?", (old_run,)), 1)
-            self.samples.start_run("future", self.policy, {"future": True},
-                                   started_at=BASE + 10000)
-            self.append(10000, run_id="future",
-                        sampling=self.sampling(records=5, retention_hours=1))
-            self.assertEqual(self.count("collector_runs", "run_id=?", (old_run,)), 0)
+        old_run = "run-with-sample"
+        self.samples.start_run(old_run, self.policy, {"old": True},
+                               started_at=BASE + 200)
+        self.append(200, run_id=old_run,
+                    sampling=self.sampling(records=5, retention_hours=100))
+        self.samples.finish_run(old_run, stopped_at=BASE + 201)
+        for index in range(12):
+            run_id = f"new-{index:02d}"
+            self.samples.start_run(run_id, self.policy, {"index": index},
+                                   started_at=BASE + 300 + index * 10)
+            self.samples.finish_run(run_id, stopped_at=BASE + 301 + index * 10)
+        self.assertEqual(self.count("collector_runs", "run_id=?", (old_run,)), 1)
+        self.samples.start_run("future", self.policy, {"future": True},
+                               started_at=BASE + 10000)
+        self.append(10000, run_id="future",
+                    sampling=self.sampling(records=5, retention_hours=1))
+        self.assertEqual(self.count("collector_runs", "run_id=?", (old_run,)), 0)
 
-        with patch.object(sample_store, "RUN_LIMIT", 4), \
-                patch.object(sample_store, "RUN_RETENTION_HOURS", 1), \
-                patch.object(sample_store, "GAP_LIMIT", 10), \
-                patch.object(sample_store, "GAP_RETENTION_HOURS", 1):
-            gap_run = "run-with-gap"
-            self.samples.start_run(gap_run, self.policy, {"gap": True},
-                                   started_at=BASE + 20000)
-            self.samples.finish_run(gap_run, stopped_at=BASE + 20001)
-            self.samples.record_gap(BASE + 20000, None, "collector_restart",
-                                    run_id=gap_run, detail={"error": "lost"})
-            for index in range(4):
-                run_id = f"gap-new-{index}"
-                self.samples.start_run(run_id, self.policy, {"index": index},
-                                       started_at=BASE + 20100 + index * 10)
-                self.samples.finish_run(run_id, stopped_at=BASE + 20101 + index * 10)
-            self.assertEqual(self.count("collector_runs", "run_id=?", (gap_run,)), 1)
-            self.samples.record_gap(BASE + 20000, BASE + 20005,
-                                    "collector_restart", run_id=gap_run)
-            self.samples.start_run("later", self.policy, {"later": True},
-                                   started_at=BASE + 30000)
-            self.assertEqual(self.count("collector_gaps", "run_id=?", (gap_run,)), 0)
-            self.assertEqual(self.count("collector_runs", "run_id=?", (gap_run,)), 0)
+        gap_run = "run-with-gap"
+        self.samples.start_run(gap_run, self.policy, {"gap": True},
+                               started_at=BASE + 20000)
+        self.samples.finish_run(gap_run, stopped_at=BASE + 20001)
+        self.samples.record_gap(BASE + 20000, None, "collector_restart",
+                                run_id=gap_run, detail={"error": "lost"})
+        for index in range(12):
+            run_id = f"gap-new-{index}"
+            self.samples.start_run(run_id, self.policy, {"index": index},
+                                   started_at=BASE + 20100 + index * 10)
+            self.samples.finish_run(run_id, stopped_at=BASE + 20101 + index * 10)
+        self.assertEqual(self.count("collector_runs", "run_id=?", (gap_run,)), 1)
+        self.samples.record_gap(BASE + 20000, BASE + 20005,
+                                "collector_restart", run_id=gap_run)
+        self.samples.start_run("later", self.policy, {"later": True},
+                               started_at=BASE + 30000)
+        self.assertEqual(self.count("collector_gaps", "run_id=?", (gap_run,)), 0)
+        self.assertEqual(self.count("collector_runs", "run_id=?", (gap_run,)), 0)
 
     def test_gaps_merge_and_auxiliary_counts_stay_bounded(self):
-        with patch.object(sample_store, "GAP_LIMIT", 3), \
-                patch.object(sample_store, "GAP_RETENTION_HOURS", 1000):
-            for index in range(6):
-                self.samples.record_gap(BASE + index * 10, BASE + index * 10 + 1,
-                                        f"gap-{index}")
-            self.assertLessEqual(self.count("collector_gaps"), 3)
-            opened = self.samples.record_gap(BASE + 100, None, "open-gap",
-                                             detail={"first": "lost"})
-            self.assertEqual(opened["gap"]["end_at"], None)
-            self.assertTrue(opened["gap"]["ongoing"])
-            closed = self.samples.record_gap(BASE + 100, BASE + 120, "open-gap",
-                                             detail={"later": "recovered"})
-            self.assertEqual(closed["status"], "merged")
-            self.assertEqual(closed["gap"]["start_at"], BASE + 100)
-            self.assertEqual(closed["gap"]["end_at"], BASE + 120)
-            self.assertEqual(closed["gap"]["detail"], {"first": "lost"})
-            self.assertLessEqual(self.count("collector_gaps"), 3)
+        self.store.history = self.history_settings(gaps_records=8, gaps_hours=1000)
+        for index in range(10):
+            self.samples.record_gap(BASE + index * 10, BASE + index * 10 + 1,
+                                    f"gap-{index}")
+        self.assertLessEqual(self.count("collector_gaps"), 8)
+        opened = self.samples.record_gap(BASE + 100, None, "open-gap",
+                                         detail={"first": "lost"})
+        self.assertEqual(opened["gap"]["end_at"], None)
+        self.assertTrue(opened["gap"]["ongoing"])
+        closed = self.samples.record_gap(BASE + 100, BASE + 120, "open-gap",
+                                         detail={"later": "recovered"})
+        self.assertEqual(closed["status"], "merged")
+        self.assertEqual(closed["gap"]["start_at"], BASE + 100)
+        self.assertEqual(closed["gap"]["end_at"], BASE + 120)
+        self.assertEqual(closed["gap"]["detail"], {"first": "lost"})
+        self.assertLessEqual(self.count("collector_gaps"), 8)
 
         with patch.object(sample_store, "SOURCE_LIMIT", 2):
             self.append(10, sources={"one": {"available": True},
@@ -906,47 +930,230 @@ class SampleStoreTests(unittest.TestCase):
     def test_run_hard_limit_rejects_and_rolls_back_after_reference_cleanup(self):
         store = self.new_store("run-hard-limit")
         samples = SampleStore(store)
-        policy = {"version": 2, "sampling": self.sampling(records=5,
-                                                          retention_hours=100)}
-        samples.start_run("A", policy, self.evidence, started_at=BASE)
-        samples.append_sample(
-            "A", observed_at=BASE, monotonic_at=1, boot=self.boot, host={"x": 1},
-            sources={}, sampling=self.sampling(records=5, retention_hours=100))
-        samples.finish_run("A", stopped_at=BASE + 1)
-        samples.start_run("B", policy, self.evidence, started_at=BASE + 10)
-        samples.record_gap(BASE + 10, None, "collector_restart", run_id="B")
-
-        with patch.object(sample_store, "RUN_LIMIT", 2), \
-                patch.object(sample_store, "RUN_RETENTION_HOURS", 1), \
-                patch.object(sample_store, "GAP_RETENTION_HOURS", 100):
-            with self.assertRaises(DatabaseError) as caught:
-                samples.start_run("C", policy, self.evidence, started_at=BASE + 20)
-            self.assertIn("硬上限", str(caught.exception))
-            self.assertIn("引用", str(caught.exception))
-            status = samples.status(now=BASE + 21)
-            self.assertEqual(status["run"]["run_id"], "B")
-            self.assertEqual(status["active_run"]["run_id"], "B")
-            self.assertEqual(status["status"], "running")
-            connection = sqlite3.connect(store.database_path)
-            try:
-                self.assertEqual({row[0] for row in connection.execute(
-                    "SELECT run_id FROM collector_runs")}, {"A", "B"})
-            finally:
-                connection.close()
-
+        history = self.history_settings(runs_records=8, runs_hours=1000,
+                                        gaps_records=100, gaps_hours=1000)
+        store.history = history
+        policy = {"version": 2, "sampling": self.sampling(records=20,
+                                                          retention_hours=100),
+                  "history": history}
+        for index in range(8):
+            run_id = f"held-{index}"
+            samples.start_run(run_id, policy, self.evidence,
+                              started_at=BASE + index * 10)
             samples.append_sample(
-                "B", observed_at=BASE + 10000, monotonic_at=2, boot=self.boot,
-                host={"x": 2}, sources={},
-                sampling=self.sampling(records=5, retention_hours=1))
-            samples.start_run("C", policy, self.evidence, started_at=BASE + 10001)
+                run_id, observed_at=BASE + index * 10, monotonic_at=1,
+                boot=self.boot, host={"x": index}, sources={},
+                sampling=self.sampling(records=20, retention_hours=100))
+            samples.finish_run(run_id, stopped_at=BASE + index * 10 + 1)
+
+        with patch.object(sample_store, "RUN_ABSOLUTE_LIMIT", 9):
+            samples.start_run("overflow", policy, self.evidence,
+                              started_at=BASE + 100)
+            # 9 条运行都被样本引用，无法在不删除证据的情况下压回目标值。
+            samples.append_sample(
+                "overflow", observed_at=BASE + 100, monotonic_at=2,
+                boot=self.boot, host={"x": "overflow"}, sources={},
+                sampling=self.sampling(records=20, retention_hours=100))
+            page = samples.query(None, None, now=BASE + 101)
+            self.assertTrue(page["retention"]["history"]["over_target"]["runs"])
+            with self.assertRaises(DatabaseError) as caught:
+                samples.start_run("rejected", policy, self.evidence,
+                                  started_at=BASE + 200)
+            message = str(caught.exception)
+            self.assertIn("绝对硬上限 9", message)
+            self.assertIn("目标 8", message)
+            self.assertIn("引用", message)
+            self.assertIn("建议", message)
+            status = samples.status(now=BASE + 201)
+            self.assertEqual(status["run"]["run_id"], "overflow")
+            self.assertEqual(status["active_run"]["run_id"], "overflow")
             connection = sqlite3.connect(store.database_path)
             try:
                 runs = {row[0] for row in connection.execute(
                     "SELECT run_id FROM collector_runs")}
             finally:
                 connection.close()
-            self.assertEqual(runs, {"B", "C"})
-            self.assertEqual(samples.status(now=BASE + 10002)["run"]["run_id"], "C")
+            self.assertEqual(len(runs), 9)
+            self.assertNotIn("rejected", runs)
+
+            samples.append_sample(
+                "overflow", observed_at=BASE + 10000, monotonic_at=2,
+                boot=self.boot, host={"x": 2}, sources={},
+                sampling=self.sampling(records=5, retention_hours=1))
+            samples.start_run("after-cleanup", policy, self.evidence,
+                              started_at=BASE + 10001)
+            connection = sqlite3.connect(store.database_path)
+            try:
+                runs = {row[0] for row in connection.execute(
+                    "SELECT run_id FROM collector_runs")}
+            finally:
+                connection.close()
+            self.assertIn("after-cleanup", runs)
+            self.assertNotIn("held-0", runs)
+            self.assertEqual(samples.status(now=BASE + 10002)["run"]["run_id"],
+                             "after-cleanup")
+
+    def test_default_history_matches_previous_retention(self):
+        self.assertIsNone(getattr(self.store, "history", None))
+        page = self.samples.query(None, BASE, now=BASE + 1)
+        gap_history = page["gap_history"]
+        self.assertEqual(gap_history["retention_hours"], 168)
+        self.assertEqual(gap_history["count_limit"], 256)
+        block = self.samples.status(now=BASE + 1)["retention"]["history"]
+        self.assertEqual(block["retention_source"], "defaults")
+        self.assertEqual(block["effective"]["runs"],
+                         {"records": 256, "retention_hours": 168})
+        self.assertEqual(block["effective"]["gaps"],
+                         {"records": 256, "retention_hours": 168})
+        self.assertEqual(block["declared"]["runs"],
+                         {"records": 256, "retention_hours": 168})
+        self.assertEqual(block["hard_limits"], {"runs": 1024, "gaps": 4096})
+
+    def test_retention_history_reports_effective_declared_and_source(self):
+        history = self.history_settings(runs_records=9, runs_hours=100,
+                                        gaps_records=11, gaps_hours=50)
+        self.use_history(history)
+        block = self.samples.status(now=BASE + 1)["retention"]["history"]
+        self.assertEqual(block["retention_source"], "latest_run_policy")
+        self.assertEqual(block["effective"]["runs"],
+                         {"records": 9, "retention_hours": 100})
+        self.assertEqual(block["effective"]["gaps"],
+                         {"records": 11, "retention_hours": 50})
+        self.assertEqual(block["counts"]["runs"], 2)
+        self.assertFalse(block["over_target"]["runs"])
+        self.assertFalse(block["over_target"]["gaps"])
+
+        changed = self.history_settings(runs_records=12, runs_hours=200,
+                                        gaps_records=20, gaps_hours=60)
+        self.store.history = changed
+        page = self.samples.query(None, BASE, now=BASE + 1)
+        block = page["retention"]["history"]
+        self.assertEqual(block["retention_source"], "latest_run_policy")
+        self.assertEqual(block["effective"]["runs"]["records"], 9)
+        self.assertEqual(block["declared"]["runs"]["records"], 12)
+        self.assertEqual(page["gap_history"]["count_limit"], 11)
+        self.assertEqual(page["gap_history"]["declared_count_limit"], 20)
+        self.assertEqual(page["gap_history"]["declared_retention_hours"], 60)
+
+    def test_history_prunes_by_time_before_count(self):
+        self.store.history = self.history_settings(runs_records=50, runs_hours=1)
+        for index in range(3):
+            started = BASE - 7200 + index * 10
+            run_id = f"old-{index}"
+            self.samples.start_run(run_id, self.policy, {"i": index},
+                                   started_at=started)
+            self.samples.finish_run(run_id, stopped_at=started + 1)
+        self.samples.start_run("now", self.policy, {"now": True},
+                               started_at=BASE + 10)
+        connection = sqlite3.connect(self.store.database_path)
+        try:
+            runs = {row[0] for row in connection.execute(
+                "SELECT run_id FROM collector_runs")}
+        finally:
+            connection.close()
+        # 时间裁剪先于条数：条数目标 50 远未达到，旧 run 仍因超龄被删。
+        self.assertEqual(runs, {self.run_id, "now"})
+
+    def test_gap_watermark_prevents_false_completeness(self):
+        self.store.history = self.history_settings(gaps_records=256, gaps_hours=168)
+        start = BASE + 831.4 * 3600
+        end = BASE + 831.6 * 3600
+        before = self.samples.query(None, BASE + 999 * 3600, now=start)
+        self.assertLess(before["gap_history"]["complete_since"], start)
+
+        self.samples.record_gap(start, end, "sample_unavailable")
+        # BASE+1000h 的写入触发 168h 时间裁剪，cutoff=BASE+832h。
+        self.samples.update_state(heartbeat_at=BASE + 1000 * 3600)
+        self.assertEqual(self.count("collector_gaps"), 0)
+        page = self.samples.query(None, BASE + 999 * 3600,
+                                  now=BASE + 1000 * 3600)
+        gap_history = page["gap_history"]
+        self.assertEqual(page["gaps"], [])
+        self.assertAlmostEqual(gap_history["pruned_through"], end)
+        self.assertGreaterEqual(gap_history["complete_since"], end)
+
+        # 只调大声明值、尚未启动新 run：effective 仍是旧设置，水位继续兜底。
+        self.store.history = self.history_settings(gaps_records=256, gaps_hours=720)
+        still = self.samples.query(None, BASE + 999 * 3600,
+                                   now=BASE + 1000 * 3600)
+        self.assertEqual(still["gap_history"]["declared_retention_hours"], 720)
+        self.assertGreaterEqual(still["gap_history"]["complete_since"], end)
+
+        # 新 run 的 effective 保留期调大到 720h，水位仍不允许虚报连续。
+        self.use_history(self.history_settings(gaps_records=256, gaps_hours=720),
+                         run_id="wide-run", started_at=BASE + 1000 * 3600)
+        wide = self.samples.query(None, BASE + 999 * 3600,
+                                  now=BASE + 1000 * 3600)["gap_history"]
+        self.assertEqual(wide["retention_source"], "latest_run_policy")
+        self.assertEqual(wide["retention_hours"], 720)
+        self.assertGreaterEqual(wide["complete_since"], end)
+
+        # 调小后以新 cutoff 为准，水位不会把它拉得比 cutoff 更早。
+        self.use_history(self.history_settings(gaps_records=256, gaps_hours=48),
+                         run_id="narrow-run", started_at=BASE + 1001 * 3600)
+        narrow = self.samples.query(None, BASE + 999 * 3600,
+                                    now=BASE + 1001 * 3600)["gap_history"]
+        self.assertEqual(narrow["retention_hours"], 48)
+        self.assertAlmostEqual(narrow["complete_since"],
+                               BASE + 999 * 3600 - 48 * 3600)
+
+    def test_gap_hard_limit_degrades_without_blocking_collection(self):
+        history = self.history_settings(gaps_records=8, gaps_hours=1000)
+        self.use_history(history)
+        with patch.object(sample_store, "GAP_ABSOLUTE_LIMIT", 9):
+            for index in range(9):
+                self.samples.record_gap(BASE + 100 + index, None,
+                                        f"open-{index}")
+            self.assertEqual(self.count("collector_gaps"), 9)
+            result = self.samples.record_gap(BASE + 200, None, "overflow")
+            self.assertEqual(result["status"], "degraded")
+            self.assertIsNone(result["gap"])
+            self.assertEqual(result["gap_history_degraded"]["dropped"], 1)
+            self.assertEqual(self.count("collector_gaps"), 9)
+
+            page = self.samples.query(None, BASE + 300)
+            gap_history = page["gap_history"]
+            self.assertTrue(gap_history["over_target"])
+            degraded = gap_history["gap_history_degraded"]
+            self.assertEqual(degraded["reason"], "gap_hard_limit")
+            self.assertEqual(degraded["gap_reason"], "overflow")
+            self.assertEqual(degraded["dropped"], 1)
+            self.assertAlmostEqual(degraded["since"], BASE + 200)
+
+            # 降级不冒泡成致命错误：后续状态写入仍成功并保留降级事实。
+            state = self.samples.update_state(heartbeat_at=BASE + 201)
+            self.assertEqual(state["history"]["gap_history_degraded"]["dropped"], 1)
+
+    def test_v1_state_envelope_is_readable_and_upgraded_on_write(self):
+        self.append(0)
+        connection = sqlite3.connect(self.store.database_path)
+        try:
+            connection.execute(
+                "UPDATE collector_state SET detail_json=?",
+                (json.dumps({"__host_steward_collector_state_v1__": 1,
+                             "detail": {"phase": "legacy"},
+                             "retention": {"records": 1}}),))
+            connection.commit()
+        finally:
+            connection.close()
+        status = self.samples.status(now=BASE + 1)
+        self.assertEqual(status["last_append"], {"records": 1})
+        self.assertIsNone(status["retention"]["gap_history_degraded"])
+        page = self.samples.query(None, BASE)
+        self.assertIsNone(page["gap_history"]["pruned_through"])
+
+        state = self.samples.update_state(detail={"phase": "upgraded"})
+        self.assertEqual(state["detail"], {"phase": "upgraded"})
+        self.assertIsNone(state["history"]["gap_pruned_through"])
+        connection = sqlite3.connect(self.store.database_path)
+        try:
+            raw = json.loads(connection.execute(
+                "SELECT detail_json FROM collector_state").fetchone()[0])
+        finally:
+            connection.close()
+        self.assertEqual(raw["__host_steward_collector_state_v2__"], 2)
+        self.assertEqual(raw["history"], {"gap_pruned_through": None,
+                                          "gap_history_degraded": None})
 
 
 if __name__ == "__main__":
