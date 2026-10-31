@@ -463,7 +463,7 @@ def patrol(store, policy, discard_scan_progress=False, discard_event_recheck=Fal
         host = observe(policy)
         observation_gaps = [{"kind": name, "reason": host[name].get("reason", "unavailable")}
                             for name in ["memory", "processes", "services"] if not host[name].get("available")]
-        # 平台缺口（例如旧内核没有 MemAvailable）不是采集失败，也要进入 agent 的固定告警通道。
+        # 平台缺口（例如旧内核没有 MemAvailable）也交给 agent 解释观察边界。
         for gap in (host.get("memory") or {}).get("platform_gaps") or []:
             observation_gaps.append({"kind": "memory", "field": gap.get("field"),
                                      "reason": gap.get("reason", "unavailable")})
@@ -604,8 +604,8 @@ def patrol(store, policy, discard_scan_progress=False, discard_event_recheck=Fal
                   "policy_version": policy["version"], "policy": policy, "policy_evidence": evidence,
                   "roots": policy["roots"],
                   "host": host_summary,
-                  "processes": dict(host["processes"], items=host["processes"]["items"][:8]),
-                  "services": dict(host["services"], items=host["services"]["items"][:12]),
+                  "processes": summarize_items(host["processes"], 8),
+                  "services": summarize_items(host["services"], 12),
                   "events": events, "directories": overview, "changes": changes, "gaps": delta["gaps"],
                   "comparison_gaps": comparison_gaps,
                   "observation_gaps": observation_gaps, "coverage_scope": coverage_scope,
@@ -620,6 +620,13 @@ def patrol(store, policy, discard_scan_progress=False, discard_event_recheck=Fal
         if discard_event_recheck:
             report["event_recheck_discarded"] = discarded_events
         return report
+
+
+def summarize_items(section, limit):
+    items = section["items"][:limit]
+    return dict(section, items=items, returned=len(items),
+                omitted=section.get("observed", len(section["items"])) - len(items),
+                truncated=bool(section.get("truncated") or len(section["items"]) > len(items)))
 
 
 def emit(value, limit=32768):
@@ -967,6 +974,8 @@ def main():
         if not args.quiet or report["observations_changed"] or args.discard_scan_progress \
                 or args.discard_event_recheck:
             emit(report, store.limits["output_bytes"])
+            if len(encode(report)) > store.limits["output_bytes"]:
+                raise SystemExit(2)
         return
     with store.lock():
         policy = refresh_policy_locked(store)
