@@ -194,14 +194,13 @@ def parse_gpu_statistics(text):
         found = re.search('"' + re.escape(key) + r'"=(\d+)', body)
         return int(found.group(1)) if found else None
 
-    result = {"device_utilization_percent": number("Device Utilization %"),
-              "renderer_utilization_percent": number("Renderer Utilization %"),
-              "tiler_utilization_percent": number("Tiler Utilization %"),
-              "allocated_bytes": number("Alloc system memory"),
-              "in_use_bytes": number("In use system memory")}
-    if not any(value is not None for value in result.values()):
-        raise ValueError("ioreg GPU PerformanceStatistics 没有已知指标")
-    return result
+    # 结构可解析但没有任何已知指标属于平台能力缺失，交由 observe_gpu 报告 unavailable；
+    # 只有结构损坏（上面的正则不匹配）才按解析失败抛出。
+    return {"device_utilization_percent": number("Device Utilization %"),
+            "renderer_utilization_percent": number("Renderer Utilization %"),
+            "tiler_utilization_percent": number("Tiler Utilization %"),
+            "allocated_bytes": number("Alloc system memory"),
+            "in_use_bytes": number("In use system memory")}
 
 
 def parse_netstat_interfaces(text):
@@ -373,6 +372,8 @@ def observe_gpu(limits):
     parsed = parse_gpu_statistics(command(["ioreg", "-r", "-d", "1", "-w", "0", "-c", klass], limits["command_bytes"]))
     if parsed is None:
         return {"available": False, "reason": f"{klass} 没有 PerformanceStatistics 属性"}
+    if not any(value is not None for value in parsed.values()):
+        return {"available": False, "reason": f"{klass} 的 PerformanceStatistics 不含已知 GPU 指标"}
     return dict(parsed, available=True, source_class=klass,
                 semantics="免提权 ioreg 瞬时采样；Alloc/In use system memory 是统一内存中的 GPU 占用")
 

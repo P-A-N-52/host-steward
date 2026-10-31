@@ -18,7 +18,9 @@ jobs:
         include:
           # macOS arm64 运行器自 2024-11 起不提供 Python < 3.11；3.9 放到 Intel 运行器，
           # 较新版本留在 macos-latest，覆盖两种 macOS 架构。
-          - os: ubuntu-latest
+          # ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04，setup-python 在该镜像上没有
+          # 3.9 预编译包；3.9 固定在仍有 3.9 包的 ubuntu-24.04，3.13 继续覆盖 ubuntu-latest。
+          - os: ubuntu-24.04
             python: "3.9"
           - os: ubuntu-latest
             python: "3.13"
