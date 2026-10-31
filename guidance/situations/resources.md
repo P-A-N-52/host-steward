@@ -25,7 +25,7 @@ CPU 结合持续时间、任务进展和前台体验判断。`ps` 百分比采�
 
 `records` 是目标值而不是硬上限：引用保护或 open 缺口导致无法压回目标时，实际条数允许超过目标，`retention.history.over_target` 与 `gap_history.over_target` 会标出。运行记录只有在达到固定绝对硬上限（1024 条）时才拒绝新增并报错，错误给出目标值、硬上限、引用原因和调整建议。缺口达到绝对硬上限（4096 条）且没有可淘汰的已关闭缺口时不阻断采集：该缺口不写入，`gap_history.gap_history_degraded` 记录 `reason/since/dropped`，下一轮继续尝试。
 
-`retention.history` 同时报告 `effective` 与 `declared`：前者是最新 run 实际使用的设置（`retention_source` 为 `latest_run_policy`，没有 run 时为 `defaults`），后者是当前 host.json 的声明值；两者不一致说明配置已改但还没有形成新 run。`gap_history.complete_since` 是缺口记录完整的起点，取参考时间（`until` 或当前）减生效保留期、已淘汰缺口的最大结束时间（`pruned_through`）与条数受限时最老缺口起点三者中的最大值；早于它的区间可能已淘汰，不能因为查不到缺口就判断连续。进程历史跟随资源样本窗口级联删除，不单独配置。
+`retention.history` 同时报告 `effective` 与 `declared`：前者是最新 run 实际使用的设置（`retention_source` 为 `latest_run_policy`，没有 run 时为 `defaults`），后者是当前 host.json 的声明值；两者不一致说明配置已改但还没有形成新 run。`gap_history.complete_since` 是缺口记录完整的起点，取参考时间（`until` 或当前）减生效保留期、已淘汰缺口的最大结束时间（`pruned_through`）与条数受限时最老缺口起点三者中的最大值；早于它的区间可能已淘汰，不能因为查不到缺口就判断连续。进程历史跟随资源样本窗口级联删除，不单独配置。输出预算不足时这些元数据可能被裁剪，以 `output_metadata_trimmed` / `gap_history_trimmed` 为准，缩小查询窗口可看完整值。
 
 每项指标保留来源、单位、时间口径和可用性。单位不明或与任务明显矛盾时，先标为待验证，补查后再用于计算或处置。
 
