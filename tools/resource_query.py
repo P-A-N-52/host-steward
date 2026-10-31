@@ -4,11 +4,14 @@ import math
 import time
 
 from resource_changes import resource_changes
-from sample_store import SampleStore
+from sample_store import MAX_QUERY_LIMIT, SampleStore
 from state_io import StewardError, decode, encode
 
 
 DEFAULT_HISTORY_LIMIT = 41
+MAX_HISTORY_LIMIT = MAX_QUERY_LIMIT
+# 新增字段不升版本；只有破坏性变更才升 version。
+RESOURCE_HISTORY_CONTRACT = {"name": "host-steward.resource_history", "version": 1}
 CONTEXT_BYTE_LIMIT = 4096
 CONTEXT_TEXT_LIMIT = 512
 CONTEXT_MAX_ITEMS = 16
@@ -286,6 +289,47 @@ def _host_section(host, name):
     return value, None
 
 
+def _memory_projection(memory, counters):
+    """投影非字节计数与平台缺口；平台没有这些字段时不输出空噪音。"""
+    summary = {}
+    units = memory.get("units")
+    if isinstance(units, dict):
+        non_byte = sorted((str(key), value) for key, value in units.items()
+                          if value != "bytes")
+        selected = non_byte[:CONTEXT_MAX_ITEMS]
+        omitted = len(non_byte) - len(selected)
+        if selected:
+            source_units = memory.get("source_units")
+            source_units = source_units if isinstance(source_units, dict) else {}
+            summary["non_byte_units"] = {
+                key: {"units": value, "source_units": source_units.get(key)}
+                for key, value in selected}
+            summary["non_byte_counters"] = {
+                key: counters.get(key) for key, _ in selected}
+            if omitted:
+                summary["non_byte_units_omitted"] = omitted
+                summary["non_byte_counters_omitted"] = omitted
+    reason = memory.get("available_reason")
+    if reason is not None:
+        summary["available_reason"] = _clip_text(reason, 512)[0]
+    gaps = memory.get("platform_gaps")
+    if isinstance(gaps, list) and gaps:
+        items = []
+        for row in gaps[:8]:
+            if isinstance(row, dict):
+                item = _selected(row, ("field", "reason", "source"))
+                for key, value in list(item.items()):
+                    if isinstance(value, str):
+                        item[key] = _clip_text(value, 256)[0]
+                items.append(item)
+            else:
+                items.append(_clip_text(str(row), 256)[0])
+        summary["platform_gaps"] = items
+        if len(gaps) > 8:
+            summary["platform_gaps_omitted"] = len(gaps) - 8
+    return summary
+
+
 def _host_summary(host):
     host = host if isinstance(host, dict) else {}
     result = {}
@@ -308,7 +352,14 @@ def _host_summary(host):
                                           "SReclaimable"))
         if components:
             summary["components"] = components
-            summary["component_units"] = "vm_stat 保留页数，Linux kB 来源已换字节；不混合相加"
+            units = memory.get("units")
+            if isinstance(units, dict) and units:
+                summary["component_units"] = (
+                    "components 均为已换算的 bytes 口径；其余 counters 的单位见 non_byte_units，"
+                    "HugePages_* 为无单位计数")
+            else:
+                summary["component_units"] = "vm_stat 保留页数；不混合相加"
+        summary.update(_memory_projection(memory, counters))
         result["memory"] = summary
 
     diskio, base = _host_section(host, "diskio")
@@ -438,6 +489,10 @@ def history_report(store, *, minutes=10, since=None, until=None,
                    limit=DEFAULT_HISTORY_LIMIT, before=None, process=None, raw=False):
     if type(minutes) not in (int, float) or not math.isfinite(minutes) or minutes <= 0:
         raise StewardError("查询 minutes 必须是有限正数")
+    if type(limit) is not int or not 1 <= limit <= MAX_HISTORY_LIMIT:
+        raise StewardError(
+            f"samples --limit 必须是 1–{MAX_HISTORY_LIMIT} 的整数（默认 {DEFAULT_HISTORY_LIMIT}）；"
+            f"超过 {MAX_HISTORY_LIMIT} 不会静默截断，请用 --before 沿固定窗口分页")
     until = time.time() if until is None else until
     since = until - minutes * 60 if since is None else since
     sample_store = SampleStore(store)
@@ -493,6 +548,7 @@ def history_report(store, *, minutes=10, since=None, until=None,
     source_scope = _source_status_scope(page["sources"])
     if raw:
         result = dict(page)
+        result["contract"] = dict(RESOURCE_HISTORY_CONTRACT)
         result["boundary"] = boundary
         result["source_status_scope"] = source_scope
         result["evaluated_sample_count"] = len(page["samples"])
@@ -539,7 +595,8 @@ def history_report(store, *, minutes=10, since=None, until=None,
     result["page"] = dict(result.get("page") or {}, evaluated=len(page["samples"]))
     for point in result["samples"]:
         point["change_from_previous"] = changes.get(point["sample_id"])
-    result.update(status="resource_history", summary=summary, raw=False,
+    result.update(status="resource_history", contract=dict(RESOURCE_HISTORY_CONTRACT),
+                  summary=summary, raw=False,
                   detail_scope="gaps/collector/latest_processes 明细按字节与元素预算摘要；"
                                "原始来源明细用 --raw 分页查询或 --output 导出")
     return result
@@ -586,8 +643,11 @@ def _compact_output_details(result):
                     changed = True
     history = result.get("gap_history")
     if isinstance(history, dict):
-        compact = _selected(history, ("retention_hours", "complete_since",
-                                      "count_limit", "count_limited"))
+        compact = _selected(history, ("retention_hours", "retention_source",
+                                      "complete_since", "count_limit", "count_limited",
+                                      "pruned_through", "declared_retention_hours",
+                                      "declared_count_limit", "hard_count_limit",
+                                      "over_target", "gap_history_degraded"))
         if compact != history:
             result["gap_history"] = compact
             result["gap_history_trimmed"] = True
@@ -643,9 +703,15 @@ def _compact_for_output(result):
         changed = True
     retention = result.get("retention")
     if isinstance(retention, dict):
-        result["retention"] = _selected(retention, (
+        compact = _selected(retention, (
             "records", "records_limit", "retention_hours", "oldest_observed_at",
-            "newest_observed_at", "span_seconds"))
+            "newest_observed_at", "span_seconds", "gap_history_degraded"))
+        history = retention.get("history")
+        if isinstance(history, dict):
+            compact["history"] = _selected(history, (
+                "retention_source", "effective", "declared", "counts",
+                "over_target", "hard_limits"))
+        result["retention"] = compact
         changed = True
     for key in ("database", "last_append"):
         if key in result:

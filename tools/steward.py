@@ -764,7 +764,8 @@ def main():
     samples.add_argument("--minutes", type=float, default=10)
     samples.add_argument("--since", type=float, help="固定窗口起点，Unix 秒")
     samples.add_argument("--until", type=float, help="固定窗口终点，Unix 秒")
-    samples.add_argument("--limit", type=int, default=41)
+    samples.add_argument("--limit", type=int, default=41,
+                         help="本页样本数，默认 41，最大 200；超限明确报错，不静默截断")
     samples.add_argument("--before", type=int, help="排除该样本编号及之后记录；需同时提供 since/until")
     samples.add_argument("--process", help="精确进程 identity，不按 PID 拼接不同生命周期")
     samples.add_argument("--raw", action="store_true", help="保留本页完整原始事实与错误明细")
