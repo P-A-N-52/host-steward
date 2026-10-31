@@ -1,6 +1,8 @@
+import platform
 import sys
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -100,8 +102,10 @@ class PatrolGpuCapabilityTests(unittest.TestCase):
             root = base / "root"
             root.mkdir()
             store, policy = initialize(base / "state", [root], "GPU 能力缺失巡检")
-            with patch("observe.platform.system", return_value="Darwin"), \
-                 patch("observe.platform.machine", return_value="x86_64"), \
+            # 只替换 observe 模块引用的 platform：host.json 与主机标识核对仍使用真实 platform。
+            darwin = SimpleNamespace(system=lambda: "Darwin", machine=lambda: "x86_64",
+                                     node=platform.node)
+            with patch("observe.platform", darwin), \
                  patch("observe.command", side_effect=response):
                 report = patrol(store, policy)
         self.assertEqual(report["status"], "observed")

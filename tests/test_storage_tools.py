@@ -127,6 +127,7 @@ class BundleTests(unittest.TestCase):
                       exclude_names=[".git", "cache"],
                       host={"system": platform.system(), "hostname": platform.node()})
         policy.pop("sampling", None)
+        policy.pop("history", None)
         policy["limits"] = dict(template["limits"], scan_depth=7)
         self.assertEqual(set(policy["limits"]), LEGACY_LIMIT_FIELDS)
         validate(policy)
