@@ -10,6 +10,16 @@
     "records": 120,
     "retention_hours": 1
   },
+  "history": {
+    "runs": {
+      "records": 256,
+      "retention_hours": 168
+    },
+    "gaps": {
+      "records": 256,
+      "retention_hours": 168
+    }
+  },
   "residents": [],
   "directory_rules": [],
   "custom_checks": [],
