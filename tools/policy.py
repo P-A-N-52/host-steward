@@ -9,6 +9,7 @@ import platform
 import re
 
 from files import canonical_path, is_canonical_path, within
+from history_config import DEFAULT_HISTORY, validate_history
 from state import StewardError, decode, read_regular_bytes
 
 
@@ -257,10 +258,14 @@ def validate(policy):
         _validate_exclude_names(policy.get("exclude_names"))
         if "sampling" in policy:
             raise StewardError("v1 不能同时配置 sampling；请显式转换为 v2 后再启用采样设置")
+        if "history" in policy:
+            raise StewardError("v1 不能配置 history；请显式转换为 v2 后再设置资源历史保留")
     else:
         if "exclude_names" in policy:
             raise StewardError("v2 排除项只能配置在各自 root 中，顶层 exclude_names 不是活动规则")
         _validate_sampling(policy.get("sampling"))
+        if "history" in policy:
+            validate_history(policy["history"])
     roots = _validate_roots(policy, version)
     if not isinstance(policy.get("residents"), list):
         raise StewardError("常驻清单格式无效")
@@ -341,6 +346,8 @@ def read_recorded_policy(directory):
         raise StewardError("只读历史预算要求有效的 v2 归档配置")
     _validate_limits(policy.get("limits"), LIMIT_FIELDS)
     _validate_sampling(policy.get("sampling"))
+    if "history" in policy:
+        validate_history(policy["history"])
     if policy.get("host") != {"system": platform.system(), "hostname": platform.node()}:
         raise StewardError("归档采集配置不属于当前主机")
     if not isinstance(evidence, dict) or evidence.get("policy_version") != 2 \
@@ -368,5 +375,6 @@ def convert_v1_policy(policy):
     result.pop("exclude_names", None)
     result["limits"] = limits
     result["sampling"] = copy.deepcopy(DEFAULT_SAMPLING)
+    result["history"] = copy.deepcopy(DEFAULT_HISTORY)
     result["version"] = 2
     return validate(result)

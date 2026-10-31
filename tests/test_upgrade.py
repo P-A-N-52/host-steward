@@ -15,6 +15,7 @@ from unittest.mock import patch
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "tools"))
 from database import Database, SCHEMA_1_TABLE_STATEMENTS
+from history_config import DEFAULT_HISTORY
 from policy import LEGACY_LIMIT_FIELDS, convert_v1_policy, read_policy_with_evidence, validate
 from state import StewardError, Store, encode
 from storage_tools import upgrade_state
@@ -32,6 +33,7 @@ class UpgradeTests(unittest.TestCase):
                            host={"system": platform.system(), "hostname": platform.node()},
                            extension={"keep": [1, 2, 3]})
         self.policy.pop("sampling", None)
+        self.policy.pop("history", None)
         self.policy["limits"] = dict(template["limits"], scan_depth=7)
         self.assertEqual(set(self.policy["limits"]), LEGACY_LIMIT_FIELDS)
         validate(self.policy)
@@ -94,6 +96,7 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(dict(loaded), expected)
         self.assertEqual(evidence["policy_version"], 2)
         self.assertEqual(loaded["extension"], self.policy["extension"])
+        self.assertEqual(loaded["history"], DEFAULT_HISTORY)
         self.assertEqual(loaded["limits"]["total_bytes"], self.policy["limits"]["total_bytes"])
         self.assertEqual(loaded["roots"][0]["max_depth"], 7)
         self.assertEqual(self.store.export_data(), self.original)

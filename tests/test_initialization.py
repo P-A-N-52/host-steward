@@ -12,8 +12,11 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "tools"))
 import state
 import steward
+from history_config import DEFAULT_HISTORY, resolve_history
+from policy import make_policy_evidence
+from sample_store import SampleStore
 from state import Store, StewardError, decode, encode
-from steward import initialize, load
+from steward import initialize, load, load_readonly
 
 
 class InitializationTests(unittest.TestCase):
@@ -93,6 +96,45 @@ class InitializationTests(unittest.TestCase):
         template = decode(steward.read_regular_bytes(PROJECT / "state/host.example.json", 32768))
         self.assertEqual(set(template["limits"]), steward.LIMIT_FIELDS,
                          "模板 limits 键集与工具契约不一致，init 会拒绝自己生成的约定")
+
+    def test_history_defaults_round_trip_through_template_init_and_load(self):
+        template = decode(steward.read_regular_bytes(PROJECT / "state/host.example.json", 32768))
+        self.assertEqual(template["history"], DEFAULT_HISTORY)
+        directory = self.base / "history-state"
+        store, policy = initialize(directory, [self.root], "历史保留配置")
+        self.assertEqual(policy["history"], DEFAULT_HISTORY)
+        self.assertEqual(store.history, DEFAULT_HISTORY)
+        self.assertEqual(decode((directory / "host.json").read_bytes())["history"], DEFAULT_HISTORY)
+        loaded_store, loaded_policy = load(directory)
+        self.assertEqual(loaded_policy["history"], DEFAULT_HISTORY)
+        self.assertEqual(loaded_store.history, loaded_policy["history"])
+
+    def test_legacy_v2_without_history_loads_with_none_and_resolves_defaults(self):
+        directory = self.base / "legacy-history"
+        store, policy = initialize(directory, [self.root], "旧配置读取")
+        legacy = dict(policy)
+        legacy.pop("history")
+        store.write("host.json", legacy)
+        loaded_store, loaded_policy = load(directory)
+        self.assertNotIn("history", loaded_policy)
+        self.assertIsNone(loaded_store.history)
+        self.assertEqual(resolve_history(loaded_store.history), DEFAULT_HISTORY)
+
+    def test_load_readonly_uses_archived_history_when_current_config_invalid(self):
+        directory = self.base / "readonly-history"
+        store, policy = initialize(directory, [self.root], "只读回退")
+        archived = json.loads(json.dumps(policy))
+        archived["history"]["runs"]["records"] = 512
+        SampleStore(store).start_run("archived-history", archived, make_policy_evidence(archived))
+        invalid = json.loads(json.dumps(policy))
+        invalid["sampling"]["records"] = 0
+        store.write("host.json", invalid)
+        loaded_store, loaded_policy, context = load_readonly(directory)
+        self.assertFalse(context["current_policy_valid"])
+        self.assertEqual(context["policy_source"], "last_valid_collector_run")
+        self.assertEqual(loaded_store.history, archived["history"])
+        self.assertEqual(loaded_policy["history"], archived["history"])
+        self.assertEqual(resolve_history(loaded_store.history), archived["history"])
 
     def test_fresh_state_supports_immediate_status_and_inventory(self):
         directory = self.base / "first-run"

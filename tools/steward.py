@@ -45,6 +45,7 @@ def evidence_for(policy):
 def refresh_policy_locked(store):
     policy = read_policy(store.path)
     store.limits = dict(policy["limits"])
+    store.history = policy.get("history")
     store.policy_evidence = evidence_for(policy)
     return policy
 
@@ -69,6 +70,7 @@ def ensure_policy_locked(store, expected):
 def load(directory):
     policy = read_policy(directory)
     store = Store(directory, policy["limits"])
+    store.history = policy.get("history")
     store.policy_evidence = evidence_for(policy)
     return store, policy
 
@@ -104,6 +106,7 @@ def initialize(directory, roots, purpose, max_depth=32):
                   host={"system": platform.system(), "hostname": platform.node()})
     validate(policy)
     store = Store(directory, policy["limits"])
+    store.history = policy.get("history")
     if any(within(root, str(store.path)) for root in root_paths(policy)):
         raise StewardError("状态目录不能包含观察根目录")
     with store.lock():
@@ -639,6 +642,7 @@ def load_readonly(directory):
         except (StewardError, OSError) as history_error:
             raise history_error from current_error
         store = Store(directory, dict(policy["limits"]))
+        store.history = policy.get("history")
         store.policy_evidence = evidence
         causes, error = [], current_error
         while error is not None and len(causes) < 4:

@@ -12,16 +12,20 @@ from unittest.mock import patch
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "tools"))
 from files import compare, scan, identity
+from history_config import (DEFAULT_HISTORY, GAP_ABSOLUTE_LIMIT, HISTORY_FIELDS,
+                            RETENTION_HOURS_ABSOLUTE_LIMIT, RUN_ABSOLUTE_LIMIT,
+                            resolve_history, validate_history)
 from inventory import query, register
 from investigate import inspect_target
 from maintain import quarantine, restore
 from observe import observe
-from policy import (DEFAULT_SAMPLING, convert_v1_policy, new_root,
-                    policy_digest, read_policy_with_evidence, root_rule, validate,
-                    excluded_by_rule)
+from policy import (DEFAULT_SAMPLING, convert_v1_policy, make_policy_evidence,
+                    new_root, policy_digest, read_policy_with_evidence,
+                    read_recorded_policy, root_rule, validate, excluded_by_rule)
+from sample_store import SampleStore
 from state import StewardError, decode
 from state_schema import read_current, validate_scope
-from steward import initialize, patrol
+from steward import initialize, patrol, refresh_policy_locked
 
 
 def legacy_limits(depth=2):
@@ -144,6 +148,118 @@ class PolicyTests(unittest.TestCase):
         modified["purpose"] = "不同的用途"
         self.assertNotEqual(policy_digest(after), policy_digest(modified))
 
+    def test_history_defaults_validation_and_ranges(self):
+        self.assertEqual(set(DEFAULT_HISTORY), {"runs", "gaps"})
+        self.assertEqual(set(DEFAULT_HISTORY["runs"]), HISTORY_FIELDS)
+        self.assertEqual(self.policy["history"], DEFAULT_HISTORY)
+        self.assertEqual(resolve_history(None), DEFAULT_HISTORY)
+        resolved = resolve_history(None)
+        resolved["runs"]["records"] = 8
+        self.assertEqual(DEFAULT_HISTORY["runs"]["records"], 256)
+
+        without = copy.deepcopy(self.policy)
+        without.pop("history")
+        validate(without)
+        self.assertIsNone(without.get("history"))
+        self.assertEqual(resolve_history(without.get("history")), DEFAULT_HISTORY)
+
+        valid = [
+            {"runs": {"records": 8, "retention_hours": 1},
+             "gaps": {"records": 8, "retention_hours": 1}},
+            {"runs": {"records": RUN_ABSOLUTE_LIMIT,
+                      "retention_hours": RETENTION_HOURS_ABSOLUTE_LIMIT},
+             "gaps": {"records": GAP_ABSOLUTE_LIMIT,
+                      "retention_hours": RETENTION_HOURS_ABSOLUTE_LIMIT}},
+            {"runs": {"records": 512, "retention_hours": 720},
+             "gaps": {"records": 2048, "retention_hours": 24}},
+        ]
+        for history in valid:
+            with self.subTest(history=history):
+                policy = copy.deepcopy(self.policy)
+                policy["history"] = history
+                validate(policy)
+                self.assertEqual(resolve_history(history), history)
+
+    def test_history_rejects_incomplete_unknown_and_out_of_range_values(self):
+        complete = copy.deepcopy(DEFAULT_HISTORY)
+        missing_field = copy.deepcopy(complete)
+        missing_field["gaps"].pop("retention_hours")
+        invalid = [
+            None, [], "default", 1, True,
+            {"runs": complete["runs"]},
+            {"gaps": complete["gaps"]},
+            {"runs": complete["runs"], "gaps": complete["gaps"], "extra": {}},
+            {"runs": list(complete["runs"].values()), "gaps": complete["gaps"]},
+            missing_field,
+        ]
+        broken_field = copy.deepcopy(complete)
+        broken_field["runs"].pop("records")
+        invalid.append(broken_field)
+        extra_field = copy.deepcopy(complete)
+        extra_field["runs"]["extra"] = 1
+        invalid.append(extra_field)
+        for group, field, value in [
+            ("runs", "records", "256"), ("runs", "records", 0), ("runs", "records", -1),
+            ("runs", "records", True), ("runs", "records", 7), ("runs", "records", 256.0),
+            ("runs", "records", RUN_ABSOLUTE_LIMIT + 1),
+            ("gaps", "records", 7), ("gaps", "records", GAP_ABSOLUTE_LIMIT + 1),
+            ("runs", "retention_hours", 0), ("runs", "retention_hours", True),
+            ("runs", "retention_hours", RETENTION_HOURS_ABSOLUTE_LIMIT + 1),
+            ("gaps", "retention_hours", -3), ("gaps", "retention_hours", "168"),
+        ]:
+            broken = copy.deepcopy(complete)
+            broken[group][field] = value
+            invalid.append(broken)
+        for history in invalid:
+            with self.subTest(history=history):
+                with self.assertRaises(StewardError):
+                    validate_history(history)
+                policy = copy.deepcopy(self.policy)
+                policy["history"] = history
+                with self.assertRaises(StewardError):
+                    validate(policy)
+
+    def test_refresh_policy_locked_updates_store_history(self):
+        changed = copy.deepcopy(self.policy)
+        changed["history"]["gaps"]["records"] = 1024
+        self.store.write("host.json", changed)
+        refreshed = refresh_policy_locked(self.store)
+        self.assertEqual(refreshed["history"], changed["history"])
+        self.assertEqual(self.store.history, changed["history"])
+
+    def test_policy_digest_includes_history(self):
+        changed = copy.deepcopy(self.policy)
+        changed["history"]["gaps"]["records"] = GAP_ABSOLUTE_LIMIT
+        self.assertNotEqual(policy_digest(self.policy), policy_digest(changed))
+        reordered = copy.deepcopy(self.policy)
+        reordered["history"] = {group: {field: reordered["history"][group][field]
+                                        for field in reversed(sorted(HISTORY_FIELDS))}
+                                for group in reversed(sorted(reordered["history"]))}
+        self.assertEqual(policy_digest(self.policy), policy_digest(reordered))
+
+    def test_recorded_policy_reads_with_or_without_history(self):
+        legacy = copy.deepcopy(self.policy)
+        legacy.pop("history")
+        SampleStore(self.store).start_run("run-without-history", legacy, make_policy_evidence(legacy))
+        loaded, evidence, run_id = read_recorded_policy(self.store.path)
+        self.assertEqual(run_id, "run-without-history")
+        self.assertEqual(evidence["policy_digest"], policy_digest(legacy))
+        self.assertIsNone(loaded.get("history"))
+        self.assertEqual(resolve_history(loaded.get("history")), DEFAULT_HISTORY)
+
+        archived = copy.deepcopy(self.policy)
+        archived["history"]["runs"]["records"] = 512
+        SampleStore(self.store).start_run("run-with-history", archived, make_policy_evidence(archived))
+        loaded, _, run_id = read_recorded_policy(self.store.path)
+        self.assertEqual(run_id, "run-with-history")
+        self.assertEqual(loaded["history"]["runs"]["records"], 512)
+
+        broken = copy.deepcopy(self.policy)
+        broken["history"]["runs"]["records"] = 7
+        SampleStore(self.store).start_run("run-broken-history", broken, make_policy_evidence(broken))
+        with self.assertRaisesRegex(StewardError, "history.runs.records"):
+            read_recorded_policy(self.store.path)
+
     def test_v1_compatibility_and_conversion_preserve_authorization_and_extensions(self):
         rule = {"path": str(self.root), "purpose": "临时资料", "kind": "temporary",
                 "allow_quarantine": True, "retention_days": 0, "recycle_bytes": 1024}
@@ -165,12 +281,19 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(converted["limits"], {key: value for key, value in legacy_limits().items()
                                                if key != "scan_depth"})
         self.assertEqual(converted["sampling"], DEFAULT_SAMPLING)
+        self.assertEqual(converted["history"], DEFAULT_HISTORY)
         self.assertEqual(converted["directory_rules"], [rule])
         self.assertEqual(converted["residents"], legacy["residents"])
         self.assertEqual(converted["未来扩展"], {"keep": True})
         self.assertNotIn("exclude_names", converted)
         with self.assertRaises(StewardError):
             convert_v1_policy(self.policy)
+        with_history = copy.deepcopy(legacy)
+        with_history["history"] = copy.deepcopy(DEFAULT_HISTORY)
+        with self.assertRaisesRegex(StewardError, "v1 不能配置 history"):
+            validate(with_history)
+        with self.assertRaisesRegex(StewardError, "v1 不能配置 history"):
+            convert_v1_policy(with_history)
 
     def test_v1_policy_supports_patrol_status_inventory_and_maintenance(self):
         rule = {"path": str(self.root), "purpose": "临时资料", "kind": "temporary",
