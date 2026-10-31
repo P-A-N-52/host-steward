@@ -51,7 +51,17 @@ host-steward/
 
 ## 开发
 
+[![CI](https://github.com/P-A-N-52/host-steward/actions/workflows/ci.yml/badge.svg)](https://github.com/P-A-N-52/host-steward/actions/workflows/ci.yml)
+
 仓库开发约定见 [AGENTS.md](AGENTS.md)。验证使用实际主机与正式 CLI，记录操作、观测范围、耗时和状态读回结果。
+
+完整测试命令（在仓库根目录运行，需要 Python 3.9+）：
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+```
+
+GitHub Actions 在 Ubuntu 与 macOS 上运行同一套测试：Python 3.9 覆盖最低支持版本，Python 3.13 覆盖较新版本；macOS 3.9 使用 Intel 运行器，3.13 使用 `macos-latest`。每个作业还会在临时目录用正式 CLI 冒烟 `init → patrol → status → backup`，临时状态不写入仓库。
 
 ## 许可证
 

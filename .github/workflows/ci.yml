@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS arm64 运行器自 2024-11 起不提供 Python < 3.11；3.9 放到 Intel 运行器，
+          # 较新版本留在 macos-latest，覆盖两种 macOS 架构。
+          - os: ubuntu-latest
+            python: "3.9"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: macos-15-intel
+            python: "3.9"
+          - os: macos-latest
+            python: "3.13"
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 安装 Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 记录运行环境
+        # test_references 的夹具按标准 022 umask 断言 0644/0755；GitHub 标准运行器默认如此，
+        # 这里记录实际值，便于首跑核对，不用 skip 掩盖差异。
+        run: |
+          uname -a
+          python3 --version
+          umask
+
+      - name: 运行单元测试
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest discover -s tests -v
+
+      - name: 正式 CLI 冒烟（临时状态）
+        shell: bash
+        run: |
+          set -eu
+          work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/host-steward-smoke.XXXXXX")"
+          work="$(cd "$work" && pwd -P)"
+          trap 'rm -rf "$work"' EXIT
+          mkdir -p "$work/root"
+          printf 'hello\n' > "$work/root/sample.txt"
+          python3 tools/steward.py init --state "$work/state" --root "$work/root" --max-depth 2 --purpose "CI 冒烟" > "$work/init.json"
+          python3 tools/steward.py patrol --state "$work/state" > "$work/patrol.json"
+          python3 tools/steward.py status --state "$work/state" > "$work/status.json"
+          python3 tools/steward.py backup --state "$work/state" --output "$work/backup.sqlite3" > "$work/backup.json"
+          python3 - "$work" <<'PY'
+          import json
+          import pathlib
+          import sqlite3
+          import sys
+
+          work = pathlib.Path(sys.argv[1])
+
+          def load(name):
+              return json.loads((work / f"{name}.json").read_text(encoding="utf-8"))
+
+          initialized = load("init")
+          assert initialized["status"] == "initialized", initialized
+          assert initialized["policy_version"] == 2, initialized
+
+          observed = load("patrol")
+          assert observed["status"] == "observed", observed
+          assert observed["last_run"]["coverage_complete"] is True, observed["last_run"]
+
+          status = load("status")
+          assert status["policy_version"] == 2, status
+          assert status["storage"]["schema_version"] == 2, status["storage"]
+          assert status["directory_count"] == 1, status["directory_count"]
+          assert status["directory_index"][0]["path"] == str(work / "root"), status["directory_index"]
+
+          backup = load("backup")
+          assert backup["status"] == "backed_up", backup
+          assert backup["verified"] is True, backup
+          assert (work / "backup.sqlite3").is_file(), backup
+          with sqlite3.connect(work / "backup.sqlite3") as connection:
+              assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+          print("CLI 冒烟通过：init → patrol → status → backup")
+          PY
