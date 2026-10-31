@@ -10,6 +10,23 @@ CPU 结合持续时间、任务进展和前台体验判断。`ps` 百分比采�
 
 内存结合实际压力和同一进程的多次样本判断。常驻历史用 `samples` 读取主机级样本（内存计数器、swap、网络接口计数、磁盘速率）与进程 RSS/CPU 序列，采集口径与分页见[查询与输出](../patrol.md#查询与输出)；`patrol` 仍按单轮保存 GPU、电源等额外观测。相邻样本是否可比先看 `continuity.reasons`：`gap_history_incomplete` 表示查询区间早于缺口记录的完整起点，不能用“没有缺口记录”推断连续。agent 根据任务、缓存行为、持续时间和内存口径分析趋势，决定是否继续调查。需要跨轮跟进时按 [巡检指导](../patrol.md#待核验事项与记录收尾)登记事项。
 
+## 保留窗口与历史配置
+
+资源库的运行记录与缺口保留设置来自 host.json 顶层 `history`，默认各 256 条、168 小时：
+
+```json
+"history": {
+  "runs": {"records": 256, "retention_hours": 168},
+  "gaps": {"records": 256, "retention_hours": 168}
+}
+```
+
+采集器每批重新读取 host.json，修改 `history` 无需重启：批次边界会结束旧 run、按新设置启动新 run，因此“只调整保留”也会形成一次 run 边界，运行记录随之增加。collector 停止时修改配置，要等下一次 `collect` 写批次才实际裁剪；只读 `samples` 不触发裁剪。运行记录与缺口都按“先时间、再条数”淘汰，被保留样本或缺口引用的 run、未关闭的缺口永远不会为了条数被删除。
+
+`records` 是目标值而不是硬上限：引用保护或 open 缺口导致无法压回目标时，实际条数允许超过目标，`retention.history.over_target` 与 `gap_history.over_target` 会标出。运行记录只有在达到固定绝对硬上限（1024 条）时才拒绝新增并报错，错误给出目标值、硬上限、引用原因和调整建议。缺口达到绝对硬上限（4096 条）且没有可淘汰的已关闭缺口时不阻断采集：该缺口不写入，`gap_history.gap_history_degraded` 记录 `reason/since/dropped`，下一轮继续尝试。
+
+`retention.history` 同时报告 `effective` 与 `declared`：前者是最新 run 实际使用的设置（`retention_source` 为 `latest_run_policy`，没有 run 时为 `defaults`），后者是当前 host.json 的声明值；两者不一致说明配置已改但还没有形成新 run。`gap_history.complete_since` 是缺口记录完整的起点，取参考时间（`until` 或当前）减生效保留期、已淘汰缺口的最大结束时间（`pruned_through`）与条数受限时最老缺口起点三者中的最大值；早于它的区间可能已淘汰，不能因为查不到缺口就判断连续。进程历史跟随资源样本窗口级联删除，不单独配置。输出预算不足时这些元数据可能被裁剪，以 `output_metadata_trimmed` / `gap_history_trimmed` 为准，缩小查询窗口可看完整值。
+
 每项指标保留来源、单位、时间口径和可用性。单位不明或与任务明显矛盾时，先标为待验证，补查后再用于计算或处置。
 
 Linux 的内存计数器逐字段单位见 `memory.units`：`bytes` 表示来源 kB 已乘 1024；`count` 表示来源无单位计数（例如 `HugePages_Total/Free/Rsvd/Surp`），保持原值；其他单位（例如 `Odd: 7 MB`）不换算，保留来源数值与单位。`memory.source_units` 保留原始单位文本，`memory.platform_gaps` 记录旧内核缺少 `MemAvailable` 等平台缺口，`patrol` 会把它们并入 `observation_gaps`。`patrol` 与常驻采集共用 `tools/linux_observe.py` 的同一 meminfo/swap 口径，同一字段在两条链路中的数值、单位与缺口解释一致。

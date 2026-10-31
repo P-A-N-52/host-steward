@@ -19,6 +19,7 @@ import threading
 import time
 import uuid
 
+from history_config import resolve_history
 from policy import make_policy_evidence, policy_digest, read_policy_with_evidence
 from resource_sampler import (
     boot_changed,
@@ -46,14 +47,15 @@ class CollectorConfigError(CollectorError):
 
 
 class _PolicyState:
-    __slots__ = ("policy", "evidence", "digest", "sampling", "limits")
+    __slots__ = ("policy", "evidence", "digest", "sampling", "limits", "history")
 
-    def __init__(self, policy, evidence, digest, sampling, limits):
+    def __init__(self, policy, evidence, digest, sampling, limits, history):
         self.policy = policy
         self.evidence = evidence
         self.digest = digest
         self.sampling = sampling
         self.limits = limits
+        self.history = history
 
 
 def _is_lock_busy(exc):
@@ -239,6 +241,10 @@ class Collector:
             value = limits.get(key)
             if type(value) is not int or value <= 0:
                 raise CollectorConfigError(f"本机约定 limits.{key} 必须是正整数")
+        try:
+            history = resolve_history(policy.get("history"))
+        except Exception as exc:
+            raise CollectorConfigError(f"资源历史保留配置无效：{exc}") from exc
         if evidence is None:
             evidence = getattr(policy, "policy_evidence", None)
         if evidence is None:
@@ -248,7 +254,7 @@ class Collector:
                 raise CollectorConfigError("无法生成配置证据") from exc
         if not isinstance(evidence, dict):
             raise CollectorConfigError("配置证据必须是对象")
-        return _PolicyState(policy, evidence, digest, sampling, limits)
+        return _PolicyState(policy, evidence, digest, sampling, limits, history)
 
     @staticmethod
     def _detail_limit_for(limits):
@@ -257,9 +263,10 @@ class Collector:
         return max(1, min(65536, int(limits.get("file_bytes", 65536)) // 2))
 
     def _apply_runtime_policy(self, state):
-        """让 Store/SampleStore 的实际写入预算与当前有效 policy 一致。"""
+        """让 Store/SampleStore 的写入预算与保留设置和当前有效 policy 一致。"""
         self.store.limits = dict(state.limits)
         self.store.policy_evidence = state.evidence
+        self.store.history = state.history
         self._detail_limit = self._detail_limit_for(state.limits)
 
     def _read_policy_state(self):
@@ -745,6 +752,7 @@ class Collector:
         old_digest = self._policy_state.digest
         old_limits = self.store.limits
         old_evidence = self.store.policy_evidence
+        old_history = getattr(self.store, "history", None)
         old_detail_limit = self._detail_limit
         switch_at, regressed = _nondecreasing(wall_now, self._run_started_at)
         try:
@@ -766,10 +774,11 @@ class Collector:
                         mode=self.mode, started_at=switch_at,
                         boot=self._boot, pid=self.pid)
                 except BaseException as start_error:
-                    # 新 run 未提交时恢复旧内存预算/证据，不能留下“新 policy + 旧 limits”
-                    # 或“旧 policy + 新 limits”的混合状态。
+                    # 新 run 未提交时恢复旧内存预算/证据/保留设置，不能留下
+                    # “新 policy + 旧 limits”或“旧 policy + 新 history”的混合状态。
                     self.store.limits = old_limits
                     self.store.policy_evidence = old_evidence
+                    self.store.history = old_history
                     self._detail_limit = old_detail_limit
                     if isinstance(start_error, Exception):
                         try:

@@ -2,7 +2,12 @@
 
 写方法只执行一个短事务，自身不获取巡检锁；调用方（collector）应在提交前
 短暂持有 ``Store.lock()``，采集阶段不要持有该锁。读方法不取巡检锁。
-本模块只依赖 ``store.limits`` 与现有 SQLite 状态库，不读取 host.json。
+
+保留设置来自 ``store.history``（host.json 顶层 ``history`` 段，热切换时由
+collector 在批次边界更新），缺省时取 ``history_config.DEFAULT_HISTORY``。
+本模块只依赖 ``store.limits``、``store.history`` 与现有 SQLite 状态库，不读取
+host.json。``records`` 是保留目标值；无法达到目标时允许超过目标直到固定绝对
+硬上限，并在查询结果里报告 ``over_target``。
 """
 
 from contextlib import contextmanager
@@ -10,18 +15,23 @@ import math
 import time
 
 from database import DatabaseError
+from history_config import (
+    GAP_ABSOLUTE_LIMIT,
+    RUN_ABSOLUTE_LIMIT,
+    resolve_history,
+)
 from state_io import decode, dumps
 
 
 DEFAULT_QUERY_LIMIT = 40
 MAX_QUERY_LIMIT = 200
-RUN_LIMIT = 256
-GAP_LIMIT = 256
 SOURCE_LIMIT = 64
-RUN_RETENTION_HOURS = 24 * 7
-GAP_RETENTION_HOURS = 24 * 7
 _STATE_FIELDS = frozenset({"run_id", "heartbeat_at", "last_complete_at", "stopped_at", "detail"})
-_STATE_MARKER = "__host_steward_collector_state_v1__"
+_STATE_MARKER_V1 = "__host_steward_collector_state_v1__"
+_STATE_MARKER_V2 = "__host_steward_collector_state_v2__"
+_STATE_V1_FIELDS = frozenset({_STATE_MARKER_V1, "detail", "retention"})
+_STATE_V2_FIELDS = frozenset({_STATE_MARKER_V2, "detail", "retention", "history"})
+_STATE_HISTORY_FIELDS = frozenset({"gap_pruned_through", "gap_history_degraded"})
 _UNSET = object()
 SQLITE_INT_MAX = 2 ** 63 - 1
 
@@ -221,6 +231,7 @@ class SampleStore:
         policy_json = self._entry(policy, "运行配置证据")
         evidence_json = self._entry(evidence, "运行来源证据")
         boot_json = None if boot is None else self._entry(boot, "启动标识")
+        history = self._history()
         with self._write() as connection:
             if connection.execute("SELECT 1 FROM collector_runs WHERE run_id=?",
                                   (run_id,)).fetchone():
@@ -248,14 +259,18 @@ class SampleStore:
                 (run_id, mode, started_at, boot_json, pid, policy_json, evidence_json))
             self._upsert_state(connection, run_id=run_id, heartbeat_at=started_at,
                                stopped_at=None)
-            self._prune_auxiliary(connection, started_at)
+            self._prune_auxiliary(connection, started_at, history=history)
             run_count = connection.execute(
                 "SELECT COUNT(*) FROM collector_runs").fetchone()[0]
-            if run_count > RUN_LIMIT:
+            if run_count > RUN_ABSOLUTE_LIMIT:
+                target = history["runs"]["records"]
                 raise DatabaseError(
-                    f"运行记录达到硬上限 {RUN_LIMIT}；旧运行仍被保留样本、缺口引用"
+                    f"运行记录达到绝对硬上限 {RUN_ABSOLUTE_LIMIT}（history.runs.records "
+                    f"目标 {target}）；更早的已停止运行仍被保留样本或缺口引用，"
                     "或尚未关闭，无法在不删除证据的情况下清理，拒绝新增运行。"
-                    "请核对采样保留窗口与预算")
+                    "建议缩短 sampling.retention_hours / history.gaps.retention_hours，"
+                    "或核对 history.runs.records 与容量；retention.history.over_target "
+                    "表示当前实际保留超过目标值")
             run = self._run(connection, run_id)
         return {"status": "started", "run": run, "closed_run": closed}
 
@@ -423,25 +438,35 @@ class SampleStore:
             run_id = self._key(run_id, "gap run_id")
         detail_json = None if detail is None else self._entry(detail, "gap 明细")
         now = start_at if end_at is None else end_at
+        history = self._history()
+        target = history["gaps"]["records"]
+        degraded = None
         with self._write() as connection:
             if run_id is not None and not connection.execute(
                     "SELECT 1 FROM collector_runs WHERE run_id=?", (run_id,)).fetchone():
                 raise DatabaseError(f"gap 引用的运行不存在：{run_id}")
             existing = self._find_gap(connection, start_at, end_at, reason, run_id)
+            gap_id, merged, gap = None, False, None
             if existing is None:
                 count = connection.execute("SELECT COUNT(*) FROM collector_gaps").fetchone()[0]
-                if count >= GAP_LIMIT:
-                    # 先为新缺口留出位置；未关闭缺口不会为了条数被删除。
-                    self._prune_gaps(connection, now, keep=GAP_LIMIT - 1)
+                if count >= target:
+                    # 先为新缺口腾出目标内位置；未关闭缺口不会为了条数被删除，
+                    # 因此实际条数允许超过目标，直到固定绝对硬上限。
+                    self._prune_gaps(connection, now, keep=max(1, target - 1),
+                                     history=history)
                     count = connection.execute(
                         "SELECT COUNT(*) FROM collector_gaps").fetchone()[0]
-                    if count >= GAP_LIMIT:
-                        raise DatabaseError("缺口记录达到上限，且没有可淘汰的已关闭缺口")
-                cursor = connection.execute(
-                    "INSERT INTO collector_gaps(run_id, start_at, end_at, reason, detail_json, "
-                    "recorded_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (run_id, start_at, end_at, reason, detail_json, now, now))
-                gap_id, merged = cursor.lastrowid, False
+                if count >= GAP_ABSOLUTE_LIMIT:
+                    # 缺口满且没有可淘汰的已关闭缺口：不阻断采集，记录有界降级事实。
+                    degraded = self._degrade_gap_history(
+                        connection, reason, now, target)
+                else:
+                    cursor = connection.execute(
+                        "INSERT INTO collector_gaps(run_id, start_at, end_at, reason, "
+                        "detail_json, recorded_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (run_id, start_at, end_at, reason, detail_json, now, now))
+                    gap_id, merged = cursor.lastrowid, False
             else:
                 gap_id, old_start, old_end, old_has_detail = existing
                 new_start = min(old_start, start_at)
@@ -459,8 +484,13 @@ class SampleStore:
                         "UPDATE collector_gaps SET detail_json=? WHERE gap_id=?",
                         (detail_json, gap_id))
                 merged = True
-            self._prune_auxiliary(connection, now, protect_gap_id=gap_id)
-            gap = self._gap(connection, gap_id)
+            if gap_id is not None:
+                self._prune_auxiliary(connection, now, protect_gap_id=gap_id,
+                                      history=history)
+                gap = self._gap(connection, gap_id)
+        if degraded is not None:
+            return {"status": "degraded", "gap": None,
+                    "gap_history_degraded": degraded}
         return {"status": "merged" if merged else "recorded", "gap": gap}
 
     def update_state(self, **fields):
@@ -546,8 +576,10 @@ class SampleStore:
             last_process = self._last_process_sample(connection, budget)
             open_gaps = connection.execute(
                 "SELECT COUNT(*) FROM collector_gaps WHERE end_at IS NULL").fetchone()[0]
-            retention = self._retention(connection, state, budget)
+            retention = self._retention(connection, state, budget, latest_run)
             retention["last_append"] = state["retention"]
+            retention["gap_history_degraded"] = state["history"].get(
+                "gap_history_degraded")
             sources = self._sources(connection, budget)
             stats = self._database_stats(connection, self.store.database_path)
         stopped_at = state["stopped_at"]
@@ -698,22 +730,39 @@ class SampleStore:
             active_run = self._active_run(connection, state, budget)
             latest_processes = self._latest_processes(connection, until, False, budget)
             last_sample = self._last_sample(connection)
-            retention = self._retention(connection, state, budget)
+            retention = self._retention(connection, state, budget, latest_run)
             retention["last_append"] = state["retention"]
+            retention["gap_history_degraded"] = state["history"].get(
+                "gap_history_degraded")
             sources = self._sources(connection, budget)
             stats = self._database_stats(connection, self.store.database_path)
         life = self._lifecycle(state, active_run, latest_run, now)
+        history, history_source = self._effective_history(latest_run)
+        gap_rules = history["gaps"]
+        declared = self._history()
+        pruned_through = state["history"].get("gap_pruned_through")
         reference = until if until is not None else now
-        complete_since = reference - GAP_RETENTION_HOURS * 3600
-        count_limited = gap_count >= GAP_LIMIT
+        complete_since = reference - gap_rules["retention_hours"] * 3600
+        if pruned_through is not None:
+            # 已删除的缺口不能因为调大保留期重新变成“完整”：水位不低于被删缺口的
+            # 最大结束时间，查询窗口从水位之后才算完整。
+            complete_since = max(complete_since, pruned_through)
+        count_limited = gap_count >= gap_rules["records"]
         if count_limited and oldest_gap_start is not None:
             # 条数淘汰只保留最老的已关闭缺口；再早的区间可能已经缺记录。
             complete_since = max(complete_since, oldest_gap_start)
         gap_history = {
-            "retention_hours": GAP_RETENTION_HOURS,
+            "retention_hours": gap_rules["retention_hours"],
+            "retention_source": history_source,
             "complete_since": complete_since,
-            "count_limit": GAP_LIMIT,
+            "count_limit": gap_rules["records"],
             "count_limited": count_limited,
+            "pruned_through": pruned_through,
+            "declared_retention_hours": declared["gaps"]["retention_hours"],
+            "declared_count_limit": declared["gaps"]["records"],
+            "hard_count_limit": GAP_ABSOLUTE_LIMIT,
+            "over_target": gap_count > gap_rules["records"],
+            "gap_history_degraded": state["history"].get("gap_history_degraded"),
             "semantics": "缺口早于 complete_since 可能已淘汰；该时间前无缺口不等于连续",
         }
         latest_processes["within_window"] = (
@@ -764,32 +813,63 @@ class SampleStore:
             "FROM collector_state WHERE singleton=1").fetchone()
         if length_row is None:
             return {"run_id": None, "heartbeat_at": None, "last_complete_at": None,
-                    "stopped_at": None, "detail": None, "retention": None}
+                    "stopped_at": None, "detail": None, "retention": None,
+                    "history": self._empty_state_history()}
         budget.add([length_row[0]], "采集状态明细")
         row = connection.execute(
             "SELECT run_id, heartbeat_at, last_complete_at, stopped_at, detail_json "
             "FROM collector_state WHERE singleton=1").fetchone()
         raw = None if row[4] is None else _decode(row[4], "采集状态明细")
         detail, retention = raw, None
-        if isinstance(raw, dict) and set(raw) == {_STATE_MARKER, "detail", "retention"} \
-                and raw.get(_STATE_MARKER) == 1:
+        history = self._empty_state_history()
+        if isinstance(raw, dict) and set(raw) == _STATE_V2_FIELDS \
+                and raw.get(_STATE_MARKER_V2) == 2:
+            detail, retention = raw["detail"], raw["retention"]
+            if retention is not None and not isinstance(retention, dict):
+                raise DatabaseError("采集保留摘要损坏")
+            history = self._validated_state_history(raw["history"])
+        elif isinstance(raw, dict) and set(raw) == _STATE_V1_FIELDS \
+                and raw.get(_STATE_MARKER_V1) == 1:
+            # v1 信封没有水位：按“从未裁剪”读取，兼容旧状态。
             detail, retention = raw["detail"], raw["retention"]
             if retention is not None and not isinstance(retention, dict):
                 raise DatabaseError("采集保留摘要损坏")
         return {"run_id": row[0], "heartbeat_at": row[1], "last_complete_at": row[2],
-                "stopped_at": row[3], "detail": detail, "retention": retention}
+                "stopped_at": row[3], "detail": detail, "retention": retention,
+                "history": history}
 
-    def _state_entry(self, detail, retention):
-        return self._entry({_STATE_MARKER: 1, "detail": detail, "retention": retention},
+    @staticmethod
+    def _empty_state_history():
+        return {"gap_pruned_through": None, "gap_history_degraded": None}
+
+    @staticmethod
+    def _validated_state_history(value):
+        if not isinstance(value, dict) or set(value) - _STATE_HISTORY_FIELDS:
+            raise DatabaseError("采集历史水位损坏")
+        watermark = value.get("gap_pruned_through")
+        if watermark is not None:
+            watermark = _timestamp(watermark, "gap_pruned_through", allow_none=True)
+        degraded = value.get("gap_history_degraded")
+        if degraded is not None and not isinstance(degraded, dict):
+            raise DatabaseError("缺口历史降级记录损坏")
+        return {"gap_pruned_through": watermark,
+                "gap_history_degraded": None if degraded is None else dict(degraded)}
+
+    def _state_entry(self, detail, retention, history):
+        return self._entry({_STATE_MARKER_V2: 2, "detail": detail,
+                            "retention": retention,
+                            "history": self._validated_state_history(history)},
                            "采集状态明细")
 
-    def _upsert_state(self, connection, *, retention=_UNSET, **fields):
+    def _upsert_state(self, connection, *, retention=_UNSET, history=_UNSET, **fields):
         current = self._read_state(connection)
         merged = dict(current)
         merged.update(fields)
         if retention is _UNSET:
             retention = current["retention"]
-        detail_json = self._state_entry(merged["detail"], retention)
+        if history is _UNSET:
+            history = current["history"]
+        detail_json = self._state_entry(merged["detail"], retention, history)
         connection.execute(
             "INSERT INTO collector_state(singleton, run_id, heartbeat_at, last_complete_at, "
             "stopped_at, detail_json) VALUES (1, ?, ?, ?, ?, ?) "
@@ -950,7 +1030,7 @@ class SampleStore:
         sampling = policy.get("sampling")
         return sampling if isinstance(sampling, dict) else None
 
-    def _retention(self, connection, state=None, budget=None):
+    def _retention(self, connection, state=None, budget=None, latest_run=None):
         budget = budget or self._budget()
         count, oldest, newest = connection.execute(
             "SELECT COUNT(*), MIN(observed_at), MAX(observed_at) FROM resource_samples"
@@ -967,10 +1047,29 @@ class SampleStore:
             if type(hours) is not int or hours <= 0:
                 raise DatabaseError("采样配置 retention_hours 损坏")
         span = None if count == 0 else max(0.0, float(newest) - float(oldest))
+        history, history_source = self._effective_history(latest_run)
+        declared = self._history()
+        run_count, gap_count = connection.execute(
+            "SELECT (SELECT COUNT(*) FROM collector_runs), "
+            "(SELECT COUNT(*) FROM collector_gaps)").fetchone()
         return {"records": count, "processes": processes,
                 "records_limit": limit, "retention_hours": hours,
                 "oldest_observed_at": oldest, "newest_observed_at": newest,
-                "span_seconds": span}
+                "span_seconds": span,
+                "history": {
+                    "retention_source": history_source,
+                    "effective": {"runs": dict(history["runs"]),
+                                  "gaps": dict(history["gaps"])},
+                    "declared": {"runs": dict(declared["runs"]),
+                                 "gaps": dict(declared["gaps"])},
+                    "counts": {"runs": run_count, "gaps": gap_count},
+                    "over_target": {
+                        "runs": run_count > history["runs"]["records"],
+                        "gaps": gap_count > history["gaps"]["records"],
+                    },
+                    "hard_limits": {"runs": RUN_ABSOLUTE_LIMIT,
+                                    "gaps": GAP_ABSOLUTE_LIMIT},
+                }}
 
     def _sources(self, connection, budget=None):
         budget = budget or self._budget()
@@ -1158,43 +1257,103 @@ class SampleStore:
                 "truncated": bool(row[4]), "process_count": row[5],
                 "meta": meta, "processes": processes}
 
-    def _prune_auxiliary(self, connection, now, protect_gap_id=None,
-                         protect_run_id=None):
-        self._prune_gaps(connection, now, protect_gap_id)
-        self._prune_runs(connection, now, protect_run_id)
+    def _history(self):
+        """当前声明的保留设置；未接线或省略 history 时取默认值。"""
+        return resolve_history(getattr(self.store, "history", None))
 
-    def _prune_gaps(self, connection, now, protect_gap_id=None, keep=None):
-        keep = GAP_LIMIT if keep is None else keep
-        cutoff = now - GAP_RETENTION_HOURS * 3600
-        if protect_gap_id is None:
-            connection.execute(
-                "DELETE FROM collector_gaps WHERE end_at IS NOT NULL AND end_at < ?",
-                (cutoff,))
+    def _effective_history(self, latest_run):
+        """最新运行实际使用的保留设置与来源；运行策略未带 history 时取默认。"""
+        policy = latest_run.get("policy") if isinstance(latest_run, dict) else None
+        value = policy.get("history") if isinstance(policy, dict) else None
+        if value is None:
+            return resolve_history(None), "defaults"
+        return resolve_history(value), "latest_run_policy"
+
+    def _note_gap_pruned(self, connection, end_at):
+        """记录已淘汰缺口的最大 end_at；水位只增不减，供查询判断完整起点。"""
+        if end_at is None:
+            return
+        state = self._read_state(connection)
+        history = state["history"]
+        current = history.get("gap_pruned_through")
+        value = float(end_at)
+        if current is not None and float(current) >= value:
+            return
+        self._upsert_state(connection, history=dict(
+            history, gap_pruned_through=value))
+
+    def _degrade_gap_history(self, connection, reason, now, target):
+        """缺口无法在不删 open 缺口的前提下新增时，记录有界降级事实并继续。"""
+        state = self._read_state(connection)
+        current = state["history"].get("gap_history_degraded")
+        if isinstance(current, dict):
+            since = current.get("since", now)
+            dropped = int(current.get("dropped") or 0) + 1
         else:
-            connection.execute(
-                "DELETE FROM collector_gaps WHERE end_at IS NOT NULL AND end_at < ? "
-                "AND gap_id != ?", (cutoff, protect_gap_id))
+            since, dropped = now, 1
+        degraded = {
+            "reason": "gap_hard_limit",
+            "detail": (f"缺口记录达到绝对硬上限 {GAP_ABSOLUTE_LIMIT}"
+                       f"（history.gaps.records 目标 {target}），"
+                       "没有可淘汰的已关闭缺口；该缺口未写入并继续采集")[:512],
+            "gap_reason": str(reason)[:120],
+            "since": since,
+            "dropped": dropped,
+            "last_dropped_at": now,
+        }
+        self._upsert_state(connection, history=dict(
+            state["history"], gap_history_degraded=degraded))
+        return degraded
+
+    def _prune_auxiliary(self, connection, now, protect_gap_id=None,
+                         protect_run_id=None, history=None):
+        history = history or self._history()
+        self._prune_gaps(connection, now, protect_gap_id, history=history)
+        self._prune_runs(connection, now, protect_run_id, history=history)
+
+    def _prune_gaps(self, connection, now, protect_gap_id=None, keep=None,
+                    history=None):
+        history = history or self._history()
+        keep = history["gaps"]["records"] if keep is None else keep
+        cutoff = now - history["gaps"]["retention_hours"] * 3600
+        conditions = "end_at IS NOT NULL AND end_at < ?"
+        parameters = [cutoff]
+        if protect_gap_id is not None:
+            conditions += " AND gap_id != ?"
+            parameters.append(protect_gap_id)
+        deleted_max = connection.execute(
+            "SELECT MAX(end_at) FROM collector_gaps WHERE " + conditions,
+            parameters).fetchone()[0]
+        connection.execute(
+            "DELETE FROM collector_gaps WHERE " + conditions, parameters)
+        self._note_gap_pruned(connection, deleted_max)
         excess = connection.execute(
             "SELECT COUNT(*) FROM collector_gaps").fetchone()[0] - keep
         if excess <= 0:
             return
-        if protect_gap_id is None:
-            connection.execute(
-                "DELETE FROM collector_gaps WHERE gap_id IN ("
-                "SELECT gap_id FROM collector_gaps WHERE end_at IS NOT NULL "
-                "ORDER BY end_at ASC, gap_id ASC LIMIT ?)", (excess,))
-        else:
-            connection.execute(
-                "DELETE FROM collector_gaps WHERE gap_id IN ("
-                "SELECT gap_id FROM collector_gaps WHERE end_at IS NOT NULL AND gap_id != ? "
-                "ORDER BY end_at ASC, gap_id ASC LIMIT ?)",
-                (protect_gap_id, excess))
+        # 条数淘汰只删除已关闭缺口；未关闭缺口和引用保护会让实际条数停在目标之上。
+        count_conditions = "end_at IS NOT NULL"
+        count_parameters = []
+        if protect_gap_id is not None:
+            count_conditions += " AND gap_id != ?"
+            count_parameters.append(protect_gap_id)
+        deleted_max = connection.execute(
+            "SELECT MAX(end_at) FROM (SELECT end_at FROM collector_gaps WHERE "
+            + count_conditions + " ORDER BY end_at ASC, gap_id ASC LIMIT ?)",
+            (*count_parameters, excess)).fetchone()[0]
+        connection.execute(
+            "DELETE FROM collector_gaps WHERE gap_id IN ("
+            "SELECT gap_id FROM collector_gaps WHERE " + count_conditions +
+            " ORDER BY end_at ASC, gap_id ASC LIMIT ?)",
+            (*count_parameters, excess))
+        self._note_gap_pruned(connection, deleted_max)
 
-    def _prune_runs(self, connection, now, protect_run_id=None):
+    def _prune_runs(self, connection, now, protect_run_id=None, history=None):
+        history = history or self._history()
         state = self._read_state(connection)
         current = state["run_id"] or ""
         protected = protect_run_id or ""
-        cutoff = now - RUN_RETENTION_HOURS * 3600
+        cutoff = now - history["runs"]["retention_hours"] * 3600
         unreferenced = (
             "NOT EXISTS (SELECT 1 FROM resource_samples s "
             "WHERE s.run_id=collector_runs.run_id) "
@@ -1205,7 +1364,8 @@ class SampleStore:
             "AND stopped_at IS NOT NULL AND stopped_at < ? AND " + unreferenced,
             (current, protected, cutoff))
         excess = connection.execute(
-            "SELECT COUNT(*) FROM collector_runs").fetchone()[0] - RUN_LIMIT
+            "SELECT COUNT(*) FROM collector_runs").fetchone()[0] \
+            - history["runs"]["records"]
         if excess > 0:
             connection.execute(
                 "DELETE FROM collector_runs WHERE run_id IN ("
