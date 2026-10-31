@@ -42,7 +42,52 @@ python3 /skill目录/tools/steward.py patrol --state /本机状态 --discard-sca
 - 正式库丢失，且没有能由凭据核对的临时库时，恢复可信数据库备份。保留的旧 JSON 是迁移时的快照，不能代表切换后的新记录。
 - 核对迁移结果并取得备份后，旧 JSON 与凭据可一同清理，释放状态预算；正式库保留。
 
-数据库可读时用 `backup` 取得一致快照（备份写在状态区外，只核对目标目录空间），命令见[接管指导](../setup.md#旧状态迁移与导出)。恢复前暂停使用该状态的调用，在工作副本中核对备份的完整性、结构版本、本机约定和未完成操作，再安排替换。数据库提交不包含外部文件移动：即使库已恢复，操作证据仍需与实际源、目标逐项核对。
+数据库可读时用 `backup` 取得一致快照（备份写在状态区外，只核对目标目录空间），命令见[接管指导](../setup.md#旧状态迁移与导出)。需要连同本机约定、裁剪记录和指导一起保全，或恢复到全新状态目录时，优先用下文[完整备份与恢复到全新目录](#完整备份与恢复到全新目录)；`backup` 只包含数据库。恢复前暂停使用该状态的调用，在工作副本中核对备份的完整性、结构版本、本机约定和未完成操作，再安排替换。数据库提交不包含外部文件移动：即使库已恢复，操作证据仍需与实际源、目标逐项核对。
+
+## 完整备份与恢复到全新目录
+
+需要把动态状态、本机约定、裁剪记录和本机指导放在一起保全，或恢复到另一台主机、另一个全新状态目录时，用 `backup-bundle` 创建完整备份，用 `restore-bundle` 恢复。数据库专用的 `backup` 只包含 SQLite 快照，不能替代完整 bundle。
+
+```sh
+python3 /skill目录/tools/steward.py backup-bundle --state /本机状态 --output /外部目录/完整备份-日期
+python3 /skill目录/tools/steward.py restore-bundle --bundle /外部目录/完整备份-日期 --state /全新状态目录
+python3 /skill目录/tools/steward.py restore-bundle --bundle /外部目录/完整备份-日期 --state /全新状态目录 --apply
+```
+
+`--output` 与恢复目标都必须是父目录已存在、无符号链接的规范绝对路径，不展开 `~`、相对路径或路径别名（例如 macOS 的 `/tmp` 实际指向 `/private/tmp`）；备份目标与恢复目标都必须尚不存在，包括空目录。备份目标在状态区外；`backup-bundle` 在状态锁内做在线快照，不取得 `.collector.lock`，采集可以继续；时间使用本机约定的 `scan_seconds`，目标空间按数据库两倍、其余文件、回滚余量与清单读取上限预留核对。
+
+### bundle 的内容与清单
+
+bundle 是普通目录，包含 `steward.sqlite3`、`host.json`、`adaptation.json`、`guidance/` 与 `bundle.json`。清单记录格式与版本、`created_at`、`tool_version`、schema 版本、来源状态路径与主机标识、配置语义摘要与源字节摘要、逐文件字节数与 SHA-256、数据库完整性/Schema/数据集/导出摘要/历史行数、包含与排除范围，以及独立读回结果。锁文件、迁移凭据、旧 JSON、SQLite 伴随文件和写入临时文件不进入 bundle，由 `scope.excluded` 列出；`scope.other_entries` 记录未纳入的其余顶层对象。待回收区文件、导出、检查脚本与日志、宿主任务配置和 skill 部署等外部对象也不在 bundle 内，恢复后需按本机既有位置单独核对。
+
+创建时先写入 `bundle.incomplete.json`，全部文件写入并通过逐项 SHA-256、数据库独立读回和源配置/指导稳定性复核后，才原子写入 `bundle.json` 并删除标记。中断或复核失败的目录保留未完成标记；标记存在或清单缺失的目录不能作为备份使用，也不能靠补写清单修复，只能重新创建。恢复同样按此识别：清单、文件大小或摘要、数据库伴随文件、清单结构和范围、数据库导出摘要或历史行数任一项不符都会拒绝，不进入写入阶段。
+
+### 预览、执行与不覆盖
+
+`restore-bundle` 默认只预览：读取并校验 bundle、来源配置摘要、主机标识、数据库完整性和目标位置，返回 `status=restore_plan`、`verified`、`file_count`、`unlisted_files` 与 `database`，不写任何文件。目标必须是尚不存在的新路径，父目录存在，不能位于 bundle 内或来源状态目录内；目标包含任一观察根时也会被拒绝，因为运行时不允许状态目录包含 root（状态目录位于 root 内则由扫描排除）。
+
+`--apply` 在目标父目录建立 `.{名称}.restoring-*` staging，先写 `restore.incomplete.json`，再逐文件复制并按清单 SHA-256 复核，独立校验数据库；通过后确认目标仍未出现，移除标记并原子 rename 发布。未发布失败时目标不存在，staging 保留供核对；已发布但最终独立读回失败时，stderr 给出 `restore_incomplete`、阶段、bundle 与目标，保留目标现场，不要覆盖或删除。发布后工具再独立读回配置摘要、数据库证据和全部数据集，报告 `readback`。
+
+### 恢复后的独立读回
+
+工具内读回是第一层，恢复后还应以实际部署路径重新核对：
+
+- 用 `status --state /新状态` 读回版本、`capacity`、`last_run` 与 `collector`；用 `samples`、`changes` 读回资源历史与缺口；用 `export --dataset current|inventory|operations` 读回各数据集。
+- 对照 `bundle.json` 的 `files` 重新计算关键文件 SHA-256，对照 `database.history` 的行数与实际查询结果；数据库另做 `PRAGMA integrity_check` 或按上文[迁移中断与数据库恢复](#迁移中断与数据库恢复)核对。
+- 只读命令在配置无效或主机标识不符时可能以 `policy_source=last_valid_collector_run` 回退，并报 `current_policy_valid=false`；这只说明历史仍可读，不代表恢复成功，按下面的主机标识与配置核对处理。
+
+### 首轮 patrol 与 state_path 范围变化
+
+恢复到新的状态路径后，首轮 `patrol` 会在 `comparison_gaps` 中报告 `scope: scan semantics changed (state_path)`，并在 `new_baselines` 中重建该 root 的基线。这是预期：基线保存的扫描范围包含旧状态目录路径，路径变化使比较不可比；该轮不据此判断删除，既有变化与资源历史仍在，之后恢复常规跨轮比较。若新状态目录位于某个观察 root 内，扫描按现有规则把它排除；不要手工把状态目录当作受管目录，也不要对它执行说明写入或回收。
+
+### 外部对象、采集运行与换机身份
+
+bundle 只保存状态文件，不保存外部对象或运行中的进程：
+
+- 恢复只创建状态目录，不改宿主任务、skill 部署或本地 agent 记录的路径；把调度与 `--state` 改到新路径，并停止或改指旧状态目录的调用，避免两个状态分叉。
+- 恢复前用 `export --dataset operations` 或 `status` 记录未完成操作；恢复后按操作编号与身份核对实际源、目标。bundle 不含待回收区文件，`quarantined`/`restoring` 记录仍需按[恢复文件](#恢复文件)核对。
+- 恢复出的数据库可能保留旧采集运行与心跳。`status.collector` 按心跳年龄报告 stopped 或 stale，不会把旧运行当作当前进程；下一次 `collect` 关闭遗留的 open 缺口（例如 `collector_stopped`），非正常停止另记 `unclean_stop`，然后按当前 `host.json` 新开 run。启动前先核对宿主调度与状态路径。
+- 换机恢复时，bundle 清单与 `host.json` 记录来源主机的 `system`/`hostname`。主机标识不同时默认拒绝；确需迁移时用 `--allow-foreign-host` 显式放行。放行只完成文件恢复，工具不改写 `host.json`：恢复后只读命令可能以归档运行回退读取历史（`current_policy_valid=false`），`patrol`、采集与维护仍以“主机标识与当前环境不符”拒绝。先在恢复后的 `host.json` 中把 `host` 改为当前主机并核对 roots、规则与预算，再继续；`backup-bundle` 同样要求本机标识与当前环境一致。
 
 ## 配置与结构升级中断
 

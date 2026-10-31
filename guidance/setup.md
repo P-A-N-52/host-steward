@@ -31,7 +31,7 @@ host-steward/
 
 仓库的介绍、开发约定、设计文档、测试和上游参考留在开发侧。运行时从 `SKILL.md` 进入，按任务读取指导和所需工具。每台主机使用独立的部署副本，以便完成接管后移除该副本的首次引导。
 
-确认本机为 macOS/Linux 且有 Python 3.9+，工具只依赖标准库。用 `python3 /skill目录/tools/steward.py --help` 核对命令入口，任务配置使用已验证的 Python 绝对路径。当前为 0.2，macOS 与 Linux（K6）已实测巡检、文件变化、缺口、历史轮转、状态读写、备份，以及自建临时文件的说明写入、回收与恢复；常驻资源采集（`collect`/`samples`）已在 macOS 实测第一里程碑，Linux 端待 K6 实机验收；部署时核对本机可用观测与缺口。维护命令的预览、执行和恢复约定按[文件与存储](situations/files-storage.md)及[恢复指导](situations/recovery.md)读取，其他维护动作由本地 agent 在对应授权内使用已有工具完成。
+确认本机为 macOS/Linux 且有 Python 3.9+，工具只依赖标准库。用 `python3 /skill目录/tools/steward.py --help` 核对命令入口，任务配置使用已验证的 Python 绝对路径。macOS 与 Linux（K6）已实测巡检、文件变化、缺口、历史轮转、状态读写、备份、常驻采集与完整备份/恢复，以及自建临时文件的说明写入、回收与恢复；工具版本见状态与巡检结果中的 `tool_version`，平台可用观测与缺口在部署时按本机核对。维护命令的预览、执行和恢复约定按[文件与存储](situations/files-storage.md)及[恢复指导](situations/recovery.md)读取，其他维护动作由本地 agent 在对应授权内使用已有工具完成。
 
 ## 确定范围与部署位置
 
@@ -82,6 +82,14 @@ python3 /skill目录/tools/steward.py backup --state /本机状态 --output /外
 
 导出包含数据集名称、来源、导出时间与 data；省略 `--output` 时结果受工具输出预算限制。`backup` 使用 SQLite 备份接口并校验数据库，生成动态状态的一致快照；备份写在状态区外，按主库、伴随文件与目标日志预留核对可用空间，时间使用本轮时间预算。`host.json`、`adaptation.json` 与本机指导另行保存；备份的长期保留由本机既有安排管理。
 
+需要连同本机约定与指导一起保全时，用 `backup-bundle` 在状态区外新建完整备份目录：
+
+```sh
+python3 /skill目录/tools/steward.py backup-bundle --state /本机状态 --output /外部目录/完整备份-日期
+```
+
+目录包含 SQLite 一致快照、`host.json`、`adaptation.json`、`guidance/` 和 `bundle.json` 清单（逐文件 SHA-256、工具与 schema 版本、创建时间、来源主机与范围）。目标必须尚不存在；先写 `bundle.incomplete.json`，清单最后原子发布，标记存在或清单缺失即不可恢复。恢复用 `restore-bundle --bundle /外部目录/完整备份-日期 --state /全新状态目录`：默认只校验预览，`--apply` 才写入尚不存在的新目录，不覆盖现有状态；跨主机默认拒绝，`--allow-foreign-host` 只放行、不改写 `host.json`。完整语义、独立读回、首轮巡检变化与外部对象核对见[完整备份与恢复到全新目录](situations/recovery.md#完整备份与恢复到全新目录)。
+
 ## 配置与结构显式升级
 
 新初始化使用配置 v2 与数据库 schema 2。已有 v1 配置和 schema 1 数据集仍可读写，不在连接时自动改版。JSON 状态先按上节 `migrate` 导入，再预览配置与结构升级：
@@ -99,7 +107,9 @@ python3 /skill目录/tools/steward.py upgrade --state /本机状态 --apply --ba
 
 初始常驻清单与目录规则为空，按接管结果在 `host.json` 中填写。v2 的每个 root 包含 `path`、`max_depth`、`exclude_names` 和 `exclude_paths`：`max_depth` 为非负整数，0 表示只检查 root 的直属条目；`exclude_names` 按单层名称匹配，`exclude_paths` 相对于该 root、按路径分量匹配指定文件或子树，不能越出 root。root 与规则路径使用无符号链接的规范绝对路径，保留原有大小写、Unicode 与空格；root 之间不能重叠或指向同一 `samefile` 对象。目录规则包含 `path`、`purpose` 和 `kind`。类别由 agent 按本机用途命名，为最多 64 字节的非空短文本；可沿用 cold / temporary / active / service。每个规范路径配置一条，嵌套目录采用最具体的规则。类别本身不增加权限，`allow_notes`、`allow_quarantine` 缺省为不允许，按接管时确认的动作填写；当前回收工具只接受明确授权的 `temporary` 文件。
 
-`sampling` 只在 v2 使用，包含主机采样间隔、单轮时间预算、进程采样间隔、每页进程数、历史条数与保留小时；字段必须是完整正整数，单轮时间预算不得大于主机采样间隔，`process_interval_seconds` 不得小于 `interval_seconds`。`cycle_seconds` 是单批命令的真实耗时预算：macOS 的 `iostat -c 2` 自身约需 1 秒，周期低于实际命令下限（如 1 秒）时整批按预算失败并记录缺口，不会伪造样本；调整周期前先用 `collect --once` 核对本机实际耗时。旧 v1 主机继续按字符串 root、顶层排除项与 `limits.scan_depth` 读取和巡检；使用上节 `upgrade` 显式转换后再启用 v2 设置，不能把两套规则同时当作活动来源。
+`sampling` 只在 v2 使用，包含主机采样间隔、单轮时间预算、进程采样间隔、每页进程数、样本条数与保留小时；字段必须是完整正整数，单轮时间预算不得大于主机采样间隔，`process_interval_seconds` 不得小于 `interval_seconds`。`cycle_seconds` 是单批命令的真实耗时预算：macOS 的 `iostat -c 2` 自身约需 1 秒，周期低于实际命令下限（如 1 秒）时整批按预算失败并记录缺口，不会伪造样本；调整周期前先用 `collect --once` 核对本机实际耗时。旧 v1 主机继续按字符串 root、顶层排除项与 `limits.scan_depth` 读取和巡检；使用上节 `upgrade` 显式转换后再启用 v2 设置，不能把两套规则同时当作活动来源。
+
+顶层 `history` 控制采集运行与缺口的保留，省略整段即全部使用默认值（`runs`、`gaps` 各 256 条、168 小时）；提供时必须完整包含 `runs` 与 `gaps`，每组同时给出 `records`、`retention_hours`。`records` 是目标条数，范围 runs 8–1024、gaps 8–4096；`retention_hours` 范围 1–8760；字段只接受正整数，布尔值无效。v1 配置不接受 `history`，先按上节 `upgrade` 显式转换。采集每批重新读取配置，修改后无需重启：批次边界结束旧 run 并按新设置开新 run，只调整保留也会形成一次 run 边界；采集停止时修改，在下一次 `collect` 写批次时才生效。`records` 因被样本/缺口引用或 open 缺口保护而无法压回目标时允许超过目标，`samples` 的 `retention.history.over_target` 标出；仅达到固定绝对硬上限才拒绝新增，缺口满且无已关闭缺口可淘汰时降级记账并继续采集。`sampling.records`/`retention_hours` 管样本本身，`history.runs`/`gaps` 管运行与缺口记录，不要混用；字段语义与查询见[保留窗口与历史配置](situations/resources.md#保留窗口与历史配置)。
 
 `custom_checks` 是顶层可选数组，省略等价于空数组；`init` 模板写入空数组。每项必须有且仅有 `name`、`command`、`purpose`：名称在同一配置内唯一；`command` 是 1–16 个非空参数，首项为绝对路径，工具直接执行、不经过 shell、不按 PATH 查找；用途为不超过 512 字节的非空短文本。只登记用户确认过用途、命令、运行用户、预算和副作用的脚本。脚本以当前用户权限运行，工具只能限制时间和输出，不能保证只读；新增或修改是有副作用的授权变更，先说明影响并保存 `host.json` 副本。结果不写入状态，`patrol` 也不会自动运行，运行时机、失败语义和调度方式见[自定义检查](situations/custom-checks.md)。
 
@@ -117,9 +127,10 @@ v2 主机可用 `collect` 前台常驻采集，由宿主管理进程生命周期
 python3 /skill目录/tools/steward.py collect --state /本机状态            # 持续采集，SIGTERM 在批次边界停止
 python3 /skill目录/tools/steward.py collect --state /本机状态 --once     # 只采一批，验证配置与本机耗时
 python3 /skill目录/tools/steward.py samples --state /本机状态            # 最近十分钟有界历史
+python3 /skill目录/tools/steward.py changes --state /本机状态            # 最近 60 分钟变化聚合
 ```
 
-采集按批次读取 `host.json`，配置变化在批次边界切换并新开运行记录；配置无效时暂停采集、显式记录缺口与心跳，历史仍可用 `samples`/`status` 读取（报告标明 `policy_source=last_valid_collector_run` 与当前配置错误，该归档预算只供读取，不授予采集、维护或升级授权）。`samples` 与 `status` 不等待巡检锁；分页用 `--since/--until` 固定窗口加 `--before`，`--output` 把本页完整原始事实导出到状态区外。来源失败保留原始异常；GPU、电源、TCP 状态与模型占用不在常驻来源内，以 `not_observed` 报告，需要时用 `patrol` 的单轮观测补齐。
+采集按批次读取 `host.json`，配置变化在批次边界切换并新开运行记录；配置无效时暂停采集、显式记录缺口与心跳，历史仍可用 `samples`/`changes`/`status` 读取（报告标明 `policy_source=last_valid_collector_run` 与当前配置错误，该归档预算只供读取，不授予采集、维护或升级授权）。`samples`、`changes` 与 `status` 不等待巡检锁；分页用 `--since/--until` 固定窗口加 `--before`，`--output` 把本页完整原始事实导出到状态区外。来源失败保留原始异常；GPU、电源、TCP 状态与模型占用不在常驻来源内，以 `not_observed` 报告，需要时用 `patrol` 的单轮观测补齐。变化聚合与两点差分见[查询与输出](patrol.md#查询与输出)。
 
 允许写说明或回收的目录还需配置 `directory_id`：运行 `python3 /skill目录/tools/steward.py status --state /本机状态 --path /约定目录`，在 `directory_index` 中找到 path 完全相同的行，取其 `id`（`dev:ino`）。缺少精确行时先补观测。临时内容回收还需 `retention_days` 和 `recycle_bytes`；工具按修改时间判断期限，任务是否结束、依赖是否解除由执行者现场核对。
 
